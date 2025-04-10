@@ -43,8 +43,12 @@ from docx.oxml.ns import nsmap
 import docx
 import time
 from collections import OrderedDict
-from win32com.client import constants
 import shutil
+from win32com.client import constants, gencache
+from win32com.client import constants as wdConst
+from win32com.client.gencache import EnsureDispatch
+from urllib.parse import unquote
+
 
 
 # Pregunta al usuario si quiere descargar todas las páginas y subpáginas de la Wiki
@@ -71,6 +75,79 @@ if respuesta.lower() == 'si':
         import docx
         import time
         from collections import OrderedDict
+        import sys
+        import pythoncom
+        
+        
+        def limpiar_cache_com():
+            print("Iniciando limpieza de caché COM...")
+            try:
+                # Asegurar que se pueda escribir en la caché
+                win32com.client.gencache.is_readonly = False
+                gen_py_path = win32com.__gen_path__
+                print(f"Limpieza de caché COM en: {gen_py_path}")
+                
+                # Verificar si el directorio `gen_py` existe
+                if os.path.exists(gen_py_path):
+                    shutil.rmtree(gen_py_path)  # Eliminar el directorio
+                    print("✓ Caché COM eliminada exitosamente")
+                else:
+                    print("No se encontró el directorio `gen_py`. No es necesario limpiarlo.")
+                
+                # Confirmar si se eliminó correctamente
+                if not os.path.exists(gen_py_path):
+                    print("✓ Confirmación: El directorio `gen_py` fue eliminado correctamente.")
+                else:
+                    print("✗ Error: No se pudo eliminar completamente el directorio `gen_py`.")
+                    return False  # Salida anticipada si no se elimina
+                
+                pythoncom.CoInitialize()  # Inicializar COM para evitar problemas
+                return True
+            except Exception as e:
+                print(f"Error al limpiar la caché COM: {e}")
+                return False
+
+        def inicializar_word():
+            try:
+                print("Intentando inicializar Word normalmente...")
+                pythoncom.CoInitialize()  # Inicializar COM antes de `EnsureDispatch`
+                word_app = win32com.client.gencache.EnsureDispatch('Word.Application')
+                print("✓ Word inicializado correctamente")
+                return word_app
+            except AttributeError as e:
+                # Detectar problemas de caché COM
+                if "CLSIDToClassMap" in str(e) or "CLSIDToPackageMap" in str(e):
+                    print("\\nProblema con la caché COM. Intentando solucionarlo...")
+                    if limpiar_cache_com():
+                        try:
+                            print("\\nReintentando inicializar Word después de limpiar caché...")
+                            # Intentamos regenerar la caché usando EnsureDispatch
+                            word_app = win32com.client.gencache.EnsureDispatch('Word.Application')
+                            print("✓ Word reinicializado exitosamente")
+                            return word_app
+                        except Exception as e2:
+                            print(f"Error al reinicializar Word: {e2}")
+                            raise
+                else:
+                    print(f"Error de atributo no relacionado con la caché: {e}")
+                    raise
+            except Exception as e:
+                print(f"Error inesperado al inicializar Word: {e}")
+                raise
+
+        # Bloque principal para inicializar Word
+        try:
+            word_app = inicializar_word()
+        except Exception as e:
+            print(f"Fallo crítico: {e}. Intentando regenerar manualmente la caché.")
+            try:
+                pythoncom.CoInitialize()
+                # Reforzamos la regeneración con EnsureDispatch
+                win32com.client.gencache.EnsureDispatch('Word.Application')
+                word_app = win32com.client.Dispatch('Word.Application')
+            except Exception as e2:
+                print(f"No se pudo generar la caché COM: {e2}")
+                print("Considera reinstalar `pywin32` para resolver problemas de compatibilidad.")
 
 
 
@@ -113,7 +190,7 @@ if respuesta.lower() == 'si':
 
             original_content = get_page_content(page['url'])
             content = get_page_content(page['url'])
-            # Replace <span> tags with plain text
+                                        
             content = re.sub(r'<b><span style="color:([^>]*)">([^<]*)</span></b>', r'(b)(span style="color:\\1")\\2(/span)(/b)', content, flags=re.IGNORECASE)
             content = re.sub(r'\*\*\s*\(/span\)\s*\|', '** |', content) 
             content = re.sub(r'<center>(.*?)</center>', r'\\1', content)
@@ -124,7 +201,6 @@ if respuesta.lower() == 'si':
             content = re.sub(r'TO_DO: @<([A-Fa-f0-9-]+)>', r'TO_DO: \\1', content)
             content = re.sub(r'<Lista> @<([^>]+)>', r'Lista @\\1', content)
             content = re.sub(r'\.(PNG|JPG|JPEG|GIF)', lambda x: x.group().lower(), content)
-            content = re.sub(r'<([^>]*)>', r'(\\1)', content)
             content = re.sub(r'\|\s*(\(span style="color:[^)]+\))\s*([^|]+?)\s*(?=\|)', r'| \\1 \\2(/span)', content, flags=re.IGNORECASE)
             content = re.sub(r'(\(span style="color:[^)]+\)[^|]*?)\s*\|', r'\\1 (/span)|', content)
             content = re.sub(r'\|\(/span\)', '|', content)
@@ -133,10 +209,134 @@ if respuesta.lower() == 'si':
             content = re.sub(r'\(/b\)\s*\(/span\)\s*\|', '(/b) |', content)
             # (/span) eliminado  ya que hay espacio development/DevOps tools (/span)| ejemplo1 |
             content = re.sub(r'\s+\(/span\)\|', '|', content)
-            # doble salto linea después de development/DevOps tools
-            content, count = re.subn(r'([^\\n]+)\|(?=\s+[\w\s]+\|)', r'\\1\\n\\n|', content, count=1)
+            expresion_regular = r'<PRE[^>]*><CODE[^>]*><DIV><B>(GET [^<]+)</B><BR/></DIV></CODE></PRE>'
+            content = re.sub(expresion_regular, r'negrit````\\n\\1\\n````negrit\\n\\n', content)
 
+            # Expresión regular para extraer el texto dentro de la etiqueta DIV (sin cambios)
+            content = re.sub(r'<DIV style="[^"]*">(.*?)</DIV>\s*', r'\\1\\n', content)
+
+            # Convertir etiquetas HTML a paréntesis
+            content = re.sub(r'<([^>]*)>', r'(\\1)', content)
+
+            # Formatear encabezados de tabla y eliminar saltos de línea adicionales
+            content = re.sub(r'\(TR\).*?\(TH.*?\)(.*?)\(/TH\)\s*\\n*\s*\(TH.*?\)(.*?)\(/TH\).*?\(/TR\).*?\(/THEAD\)', r'| \\1 | \\2 |\\n|--|--|\\n', content)
+
+            # Formatear celdas de tabla
+            content = re.sub(r'\(TR\).*?\(TD.*?\)(.*?)\(/TD\)\s*\(TD.*?\)(.*?)\(/TD\).*?\(/TR\)', r'| \\1 | \\2 |\\n', content)
+
+            # Eliminar elementos adicionales
+            content = re.sub(r'\(DIV\)|\(TABLE\)|\(THEAD\)|\(TBODY\)|\(TR\)|\(BR/\)', '', content)
+
+            # elimina (DIV )(TABLE )
+            content = re.sub(r'\(DIV style="color: rgb\(0, 0, 0\);font-family: &amp;quot;font-size: 14px;font-style: normal;font-weight: 400;letter-spacing: normal;text-align: start;text-indent: 0px;text-transform: none;white-space: normal;word-spacing: 0px"\)|\(TABLE style="border-collapse: collapse;border-spacing: 0px;margin: 1rem 0px 0px;padding: 0px;border: 0px;width: 860px;table-layout: auto;font-size: 0.875rem;color: rgb\(23, 23, 23\);font-family: &amp;quot"\)', '', content)
+
+            content = re.sub(r'\(/TBODY\)|\(/TABLE\)|\(/DIV\)', '', content)
+
+            content = re.sub(r'\(CODE style=".*?"\)\(SPAN style=".*?"\)(.*?)\(/SPAN\)\(/CODE\)', r'``\\1``', content)
+
+            content = re.sub(r'\(CODE style=".*?"\)|\(/CODE\)', '`', content)
+
+            content = re.sub(r'\((/?SPAN)\)', '', content, flags=re.IGNORECASE)
+
+            # Anidar y aplicar ambas expresiones regulares en una sola línea
+            content = re.sub(r'\|>', '|', re.sub(r'(\|[^|]*)(?=>)', r'\\1|', content))
+
+            # Añade saltos de linea después de un pipe si se ve bloque de código
+            content = re.sub(r'(\|\s*)\\n(```)', r'\\1\\n\\n\\2', content)
+
+             
+            # expresión regular para corregir los encabezados de la tabla Markdown       
+            content = re.sub(r'(\|\s*\w+\s*\|\s*\w+\s*\|)\s*(\|\-\-\|\-\-\|)', r'\\1\\n\\2', content)
+
+            # Expresión regular para detectar las filas de la tabla y ajustar los separadores
+            content = re.sub(r'(\|\s*[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+\s*\|)\s*\|--\|--\|--\|--\|--\|', r'\\1\\n|--|--|--|--|', content)
+
+            # Modificamos la expresión regular fix tabla y header encabezado
+            content = re.sub(r'\|\s*([^\\n|]+)\s*\\n\s*\|\s*([^\\n|]+)\s*\|\s*\|\s*---\s*---\s*\|', r'| \\1 | \\2 |\\n| --- | --- |', content)
+
+            # Eliminar porcentaje si va acompañado de guión bajo
+            content = re.sub(r'%_', '_', content)
+
+            # Ajustes de etiquetas HTML espacios innecesarios
+            content = re.sub(r'\s*((</?(?:b|span[^>]*)>))\s*', r'\\1', content)
+
+
+            # Expresión regular para modificar la tabla en una sola línea
+            content = re.sub(r'(\| Purpose User  \|)|(\|--\|--\|--\|)', lambda m: '| Purpose | User  |' if m.group(1) else '|--|--|--|--|', content)
+
+            # (b)(span style="color:red")IMPORTANT:(/b)| realiza un salto de párrafo ya que no tiene tuberia al principio
+            content = re.sub(r'^([^|]+)(\|)', r'\\1\\n\\2', content, flags=re.MULTILINE)
+
+            # Paso 2 actualizado: Asegurarse de que las celdas vacías antes del encabezado tienen un salto de línea
+            content = re.sub(r'(\|[ \t]*\|[ \t]*\|[ \t]*\|)(--\|--\|--\|--\|)', r'\\1\\n|\\2', content)
+
+            # paso3 identifica https y http luego quita acentos graves innecesarios  
+            content = re.sub(r'`(https?://[^\s`]+)`', r'\\1', content)
             
+            # Cuando la etiqueta (b)span style está pega a dos puntos
+            content = re.sub(r':(?=\(b\)|\(span style="color:[^"]+"\))', ':\\n', content)
+            
+            # Expresión regular que añade `(/span)` si falta después de `(/b)`, con cualquier color en el estilo
+            content = re.sub(r"(\(b\)\(span style=\\"color:[a-zA-Z]+\\"\).*?\(\/b\))(?!\(\/span\))", r"\\1(/span)", content)
+            
+            # Para espacios dobles después de la etiqueta de apertura
+            content = re.sub(r'(\(span [^)]+\).*?)(\s{2,})', r'\\1(/span)\\2', content)  # Para espacios dobles
+  
+            # Para finales de línea sin (/span) agrega 1 (/span)Para finales de línea sin (/span)
+            content = re.sub(r'\((span [^)]+)\)([^(/\\n]+?)(?<!(/span))(?=\s*\||(/b)|(\\n)|$)', r'(\\1)\\2 (/span)', content) 
+  
+            # Expresión regular para buscar `(/b)(/span)(/span)` y eliminar solo el último `(/span)`
+            content = re.sub(r"\(/b\)\(/span\)\(/span\)", r"(/b)(/span)", content)
+            
+            # Expresión regular para quitar '(/span)' que está cerca de una tubería '|'
+            content = re.sub(r'\|(\s*)\(/span\)', r'|', content)
+            
+            # Usamos re.sub para agregar un salto de línea después de los dos puntos y antes de "negrit"
+            content = re.sub(r":(negrit````)", r":\\n\\1", content)
+            
+            # Usamos re.sub para agregar un salto de línea si detrás de los dos puntos hay palabras y luego tres guiones
+            content = re.sub(r"(\w+:\s*)---", r"\\1\\n---", content)
+            
+            # Expresión regular para quitar '(/span)' que está cerca de un '.com'
+            content = re.sub(r'(\.com)\s*\(/span\)', r'\\1', content)
+            
+            # Usar re.sub para eliminar los saltos de línea intermedios SOLO cuando hay 3 guiones
+            content = re.sub(r'\\n{2,}(?=---)', '\\n', content)
+            
+            # Insertar saltos de párrafos después de los dos puntos antes de la imagen HTML
+            content = re.sub(r':(?!\\n)(?=\(a href="[^"]+"\)\(img src="[^"]+"[^>]*\/\)\(\/a\))', ':\\n', content)
+            
+            # Genera 1 espacio de más después de los 2 puntos
+            content = re.sub(r'(?<!`\*\*):(?!\s|\*)(?![a-zA-Z0-9]*\*\*`)(?=[A-Za-z0-9])', ': ', content)
+
+            # inserta un salto de linea en el caso que no haya ningún espacio entre los dos puntos y el texto 
+            content = re.sub(r'(:)(?=(?!\*\*)(?:[\w`]|```))', r'\\1\\n', content)
+
+            # Funciona todo alinea a la misma altura un asterisco con otro asterisco
+            content = re.sub(r'(^.*:\s*\\n)(\*)(\s*\S.*)', r'\\1    \\2\\3', content, flags=re.MULTILINE)
+            
+            # Esta expresión regular quitar inserción de saltos de linea innecesarios dentro bloques de código márkdowns
+            content = re.sub(r'```(.*?)\\n(.*?)\\n([ \\t]*\\|.*?)```', r'```\\1\\n\\2 \\3```', content, flags=re.DOTALL)
+
+            # expresión regular que autoajusta espacios necesarios cabeceras de las tablas markdown
+            # Función de reemplazo
+            def replacer(m):
+                # Si coincidió la parte separadora (?P<sep>)
+                if m.group("sep") is not None:
+                    # Convertir la línea separadora al formato "|--|--|..." según cantidad de columnas
+                    sep_line = m.group("sep").strip()
+                    columns = [col for col in sep_line.split("|") if col.strip()]
+                    return "|" + "|".join(["--"] * len(columns)) + "|"
+                else:
+                    # Sino es la parte de encabezado (?P<header>), quitamos espacios iniciales
+                    return m.group("header").lstrip()
+
+            # Expresión regular aplicada directamente con re.sub()
+            content_modificado = re.sub(r"^(?P<sep>\s*\|(?:\s*[-:]+\s*\|)+\s*)$|^(?P<header>\s+\|(?:[^|]*\|)+.*)$", 
+                                        replacer, 
+                                        content, 
+                                        flags=re.MULTILINE)
+                                        
             info = {
                 'name': page['path'],
                 'short_name': page['path'].split('/')[-1],
@@ -403,8 +603,28 @@ if respuesta.lower() == 'si':
 
         # Call the function to update the table of contents in the generated document
         update_toc(docx_file)  
-       
 
+
+        def clean_attachments_folder():
+            ###Elimina todos los archivos en la carpeta .attachments
+            attachments_dir = '.attachments'
+            if os.path.exists(attachments_dir):
+                for file_name in os.listdir(attachments_dir):
+                    file_path = os.path.join(attachments_dir, file_name)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                            print(f"Deleted file: {file_name}")
+                    except Exception as e:
+                        print(f"Failed to delete {file_name}: {e}")
+            else:
+                os.makedirs(attachments_dir)  # Si no existe, la creamos
+
+        # Limpiar la carpeta .attachments antes de descargar nuevos archivos
+        clean_attachments_folder()
+
+        print("Preparandose para descargar azure wiki GIT")       
+        
         list_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{wiki}/items?scopePath=/.attachments&recursionLevel=full&api-version=5.0"
 
         # Configura la autenticación
@@ -445,7 +665,7 @@ if respuesta.lower() == 'si':
             else:
                 print("La clave 'value' no está presente en la respuesta de la API.")
         else:
-            print(f"Error listing files: {list_response.status_code}")
+            print(f"Error al listar archivos: {list_response.status_code}. Ese código 404 no te preocupues simplemente en tu wiki no tienes ficheros imágenes de momento")
 
         pass
         
@@ -470,6 +690,83 @@ else:
         import win32com.client
         import time
         import urllib.parse
+        import subprocess
+        import sys
+        sys.coinit_flags = 0  # Asegura la inicialización correcta de COM
+        import shutil
+        import pythoncom
+        from urllib.parse import unquote
+
+        
+        def limpiar_cache_com():
+            print("Iniciando limpieza de caché COM...")
+            try:
+                # Asegurar que se pueda escribir en la caché
+                win32com.client.gencache.is_readonly = False
+                gen_py_path = win32com.__gen_path__
+                print(f"Limpieza de caché COM en: {gen_py_path}")
+                
+                # Verificar si el directorio `gen_py` existe
+                if os.path.exists(gen_py_path):
+                    shutil.rmtree(gen_py_path)  # Eliminar el directorio
+                    print("✓ Caché COM eliminada exitosamente")
+                else:
+                    print("No se encontró el directorio `gen_py`. No es necesario limpiarlo.")
+                
+                # Confirmar si se eliminó correctamente
+                if not os.path.exists(gen_py_path):
+                    print("✓ Confirmación: El directorio `gen_py` fue eliminado correctamente.")
+                else:
+                    print("✗ Error: No se pudo eliminar completamente el directorio `gen_py`.")
+                    return False  # Salida anticipada si no se elimina
+                
+                pythoncom.CoInitialize()  # Inicializar COM para evitar problemas
+                return True
+            except Exception as e:
+                print(f"Error al limpiar la caché COM: {e}")
+                return False
+
+        def inicializar_word():
+            try:
+                print("Intentando inicializar Word normalmente...")
+                pythoncom.CoInitialize()  # Inicializar COM antes de `EnsureDispatch`
+                word_app = win32com.client.gencache.EnsureDispatch('Word.Application')
+                print("✓ Word inicializado correctamente")
+                return word_app
+            except AttributeError as e:
+                # Detectar problemas de caché COM
+                if "CLSIDToClassMap" in str(e) or "CLSIDToPackageMap" in str(e):
+                    print("\\nProblema con la caché COM. Intentando solucionarlo...")
+                    if limpiar_cache_com():
+                        try:
+                            print("\\nReintentando inicializar Word después de limpiar caché...")
+                            # Intentamos regenerar la caché usando EnsureDispatch
+                            word_app = win32com.client.gencache.EnsureDispatch('Word.Application')
+                            print("✓ Word reinicializado exitosamente")
+                            return word_app
+                        except Exception as e2:
+                            print(f"Error al reinicializar Word: {e2}")
+                            raise
+                else:
+                    print(f"Error de atributo no relacionado con la caché: {e}")
+                    raise
+            except Exception as e:
+                print(f"Error inesperado al inicializar Word: {e}")
+                raise
+
+        # Bloque principal para inicializar Word
+        try:
+            word_app = inicializar_word()
+        except Exception as e:
+            print(f"Fallo crítico: {e}. Intentando regenerar manualmente la caché.")
+            try:
+                pythoncom.CoInitialize()
+                # Reforzamos la regeneración con EnsureDispatch
+                win32com.client.gencache.EnsureDispatch('Word.Application')
+                word_app = win32com.client.Dispatch('Word.Application')
+            except Exception as e2:
+                print(f"No se pudo generar la caché COM: {e2}")
+                print("Considera reinstalar `pywin32` para resolver problemas de compatibilidad.")
 
        
         # Inicializa las variables globales
@@ -484,12 +781,19 @@ else:
             return sanitized
 
         def update_toc(docx_file):
-            word = win32com.client.DispatchEx("Word.Application")
-            doc = word.Documents.Open(docx_file)
-            doc.TablesOfContents(1).Update()
-            doc.Close(SaveChanges=True)
-            word.Quit()
-
+            # No eliminamos gen_py aquí, ya lo hemos hecho manualmente
+            # Continuar con las tareas de Word
+            try:
+                print("Iniciando la aplicación de Word y actualizando la tabla de contenido...")
+                word = win32com.client.gencache.EnsureDispatch('Word.Application')
+                word.Visible = False
+                doc = word.Documents.Open(docx_file)
+                doc.TablesOfContents(1).Update()
+                doc.Close(SaveChanges=True)
+                word.Quit()
+                print("Documento de Word actualizado correctamente.")
+            except Exception as e:
+                print(f"Error al intentar iniciar o procesar la aplicación de Word: {e}")
 
         def get_page_content(url, headers):
             content_url = url + "?api-version=7.0&includeContent=true"
@@ -510,6 +814,7 @@ else:
 
             original_content = get_page_content(page['url'], headers)
             content = get_page_content(page['url'], headers)
+            # Replace <span> tags with plain text
             content = re.sub(r'<b><span style="color:([^>]*)">([^<]*)</span></b>', r'(b)(span style="color:\\1")\\2(/span)(/b)', content, flags=re.IGNORECASE)
             content = re.sub(r'\*\*\s*\(/span\)\s*\|', '** |', content) 
             content = re.sub(r'<center>(.*?)</center>', r'\\1', content)
@@ -520,7 +825,6 @@ else:
             content = re.sub(r'TO_DO: @<([A-Fa-f0-9-]+)>', r'TO_DO: \\1', content)
             content = re.sub(r'<Lista> @<([^>]+)>', r'Lista @\\1', content)
             content = re.sub(r'\.(PNG|JPG|JPEG|GIF)', lambda x: x.group().lower(), content)
-            content = re.sub(r'<([^>]*)>', r'(\\1)', content)
             content = re.sub(r'\|\s*(\(span style="color:[^)]+\))\s*([^|]+?)\s*(?=\|)', r'| \\1 \\2(/span)', content, flags=re.IGNORECASE)
             content = re.sub(r'(\(span style="color:[^)]+\)[^|]*?)\s*\|', r'\\1 (/span)|', content)
             content = re.sub(r'\|\(/span\)', '|', content)
@@ -529,10 +833,136 @@ else:
             content = re.sub(r'\(/b\)\s*\(/span\)\s*\|', '(/b) |', content)
             # (/span) eliminado  ya que hay espacio development/DevOps tools (/span)| ejemplo1 |
             content = re.sub(r'\s+\(/span\)\|', '|', content)
-            # doble salto linea después de development/DevOps tools
-            content, count = re.subn(r'([^\\n]+)\|(?=\s+[\w\s]+\|)', r'\\1\\n\\n|', content, count=1)
+            expresion_regular = r'<PRE[^>]*><CODE[^>]*><DIV><B>(GET [^<]+)</B><BR/></DIV></CODE></PRE>'
+            content = re.sub(expresion_regular, r'negrit````\\n\\1\\n````negrit\\n\\n', content)
 
-                   
+            # Expresión regular para extraer el texto dentro de la etiqueta DIV (sin cambios)
+            content = re.sub(r'<DIV style="[^"]*">(.*?)</DIV>\s*', r'\\1\\n', content)
+
+            # Convertir etiquetas HTML a paréntesis
+            content = re.sub(r'<([^>]*)>', r'(\\1)', content)
+
+            # Formatear encabezados de tabla y eliminar saltos de línea adicionales
+            content = re.sub(r'\(TR\).*?\(TH.*?\)(.*?)\(/TH\)\s*\\n*\s*\(TH.*?\)(.*?)\(/TH\).*?\(/TR\).*?\(/THEAD\)', r'| \\1 | \\2 |\\n|--|--|\\n', content)
+
+            # Formatear celdas de tabla
+            content = re.sub(r'\(TR\).*?\(TD.*?\)(.*?)\(/TD\)\s*\(TD.*?\)(.*?)\(/TD\).*?\(/TR\)', r'| \\1 | \\2 |\\n', content)
+
+            # Eliminar elementos adicionales
+            content = re.sub(r'\(DIV\)|\(TABLE\)|\(THEAD\)|\(TBODY\)|\(TR\)|\(BR/\)', '', content)
+
+            # elimina (DIV )(TABLE )
+            content = re.sub(r'\(DIV style="color: rgb\(0, 0, 0\);font-family: &amp;quot;font-size: 14px;font-style: normal;font-weight: 400;letter-spacing: normal;text-align: start;text-indent: 0px;text-transform: none;white-space: normal;word-spacing: 0px"\)|\(TABLE style="border-collapse: collapse;border-spacing: 0px;margin: 1rem 0px 0px;padding: 0px;border: 0px;width: 860px;table-layout: auto;font-size: 0.875rem;color: rgb\(23, 23, 23\);font-family: &amp;quot"\)', '', content)
+
+            content = re.sub(r'\(/TBODY\)|\(/TABLE\)|\(/DIV\)', '', content)
+
+            content = re.sub(r'\(CODE style=".*?"\)\(SPAN style=".*?"\)(.*?)\(/SPAN\)\(/CODE\)', r'``\\1``', content)
+
+            content = re.sub(r'\(CODE style=".*?"\)|\(/CODE\)', '`', content)
+
+            content = re.sub(r'\((/?SPAN)\)', '', content, flags=re.IGNORECASE)
+
+            # Anidar y aplicar ambas expresiones regulares en una sola línea
+            content = re.sub(r'\|>', '|', re.sub(r'(\|[^|]*)(?=>)', r'\\1|', content))
+
+            # Añade saltos de linea después de un pipe si se ve bloque de código
+            content = re.sub(r'(\|\s*)\\n(```)', r'\\1\\n\\n\\2', content)
+
+             
+            # expresión regular para corregir los encabezados de la tabla Markdown       
+            content = re.sub(r'(\|\s*\w+\s*\|\s*\w+\s*\|)\s*(\|\-\-\|\-\-\|)', r'\\1\\n\\2', content)
+
+            # Expresión regular para detectar las filas de la tabla y ajustar los separadores
+            content = re.sub(r'(\|\s*[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+\s*\|)\s*\|--\|--\|--\|--\|--\|', r'\\1\\n|--|--|--|--|', content)
+
+            # Modificamos la expresión regular fix tabla y header encabezado
+            content = re.sub(r'\|\s*([^\\n|]+)\s*\\n\s*\|\s*([^\\n|]+)\s*\|\s*\|\s*---\s*---\s*\|', r'| \\1 | \\2 |\\n| --- | --- |', content)
+
+            # Eliminar porcentaje si va acompañado de guión bajo
+            content = re.sub(r'%_', '_', content)
+
+            # Ajustes de etiquetas HTML espacios innecesarios
+            content = re.sub(r'\s*((</?(?:b|span[^>]*)>))\s*', r'\\1', content)
+
+            # Expresión regular para modificar la tabla en una sola línea
+            content = re.sub(r'(\| Purpose User  \|)|(\|--\|--\|--\|)', lambda m: '| Purpose | User  |' if m.group(1) else '|--|--|--|--|', content)
+
+            # (b)(span style="color:red")IMPORTANT:(/b)| realiza un salto de párrafo ya que no tiene tuberia al principio
+            content = re.sub(r'^([^|]+)(\|)', r'\\1\\n\\2', content, flags=re.MULTILINE)
+
+            # Paso 2 actualizado: Asegurarse de que las celdas vacías antes del encabezado tienen un salto de línea
+            content = re.sub(r'(\|[ \t]*\|[ \t]*\|[ \t]*\|)(--\|--\|--\|--\|)', r'\\1\\n|\\2', content)
+
+            # paso3 identifica https y http luego quita acentos graves innecesarios  
+            content = re.sub(r'`(https?://[^\s`]+)`', r'\\1', content)
+            
+            # Cuando la etiqueta (b)span style está pega a dos puntos
+            content = re.sub(r':(?=\(b\)|\(span style="color:[^"]+"\))', ':\\n', content)
+            
+            # Expresión regular que añade `(/span)` si falta después de `(/b)`, con cualquier color en el estilo
+            content = re.sub(r"(\(b\)\(span style=\\"color:[a-zA-Z]+\\"\).*?\(\/b\))(?!\(\/span\))", r"\\1(/span)", content)
+            
+            # Para espacios dobles después de la etiqueta de apertura
+            content = re.sub(r'(\(span [^)]+\).*?)(\s{2,})', r'\\1(/span)\\2', content)  # Para espacios dobles
+  
+            # Para finales de línea sin (/span) agrega 1 (/span)Para finales de línea sin (/span)
+            content = re.sub(r'\((span [^)]+)\)([^(/\\n]+?)(?<!(/span))(?=\s*\||(/b)|(\\n)|$)', r'(\\1)\\2 (/span)', content) 
+  
+            # Expresión regular para buscar `(/b)(/span)(/span)` y eliminar solo el último `(/span)`
+            content = re.sub(r"\(/b\)\(/span\)\(/span\)", r"(/b)(/span)", content)
+            
+            # Expresión regular para quitar '(/span)' que está cerca de una tubería '|'
+            content = re.sub(r'\|(\s*)\(/span\)', r'|', content)
+            
+            # Usamos re.sub para agregar un salto de línea después de los dos puntos y antes de "negrit"
+            content = re.sub(r":(negrit````)", r":\\n\\1", content)
+            
+            # Usamos re.sub para agregar un salto de línea si detrás de los dos puntos hay palabras y luego tres guiones
+            content = re.sub(r"(\w+:\s*)---", r"\\1\\n---", content)
+            
+            # Expresión regular para quitar '(/span)' que está cerca de un '.com'
+            content = re.sub(r'(\.com)\s*\(/span\)', r'\\1', content)
+            
+            # Usar re.sub para eliminar los saltos de línea intermedios SOLO cuando hay 3 guiones
+            content = re.sub(r'\\n{2,}(?=---)', '\\n', content)
+            
+            # Insertar saltos de párrafos después de los dos puntos antes de la imagen HTML
+            content = re.sub(r':(?!\\n)(?=\(a href="[^"]+"\)\(img src="[^"]+"[^>]*\/\)\(\/a\))', ':\\n', content)
+            
+            
+            # Genera 1 espacio de más después de los 2 puntos
+            content = re.sub(r'(?<!`\*\*):(?!\s|\*)(?![a-zA-Z0-9]*\*\*`)(?=[A-Za-z0-9])', ': ', content)
+
+            # inserta un salto de linea en el caso que no haya ningún espacio entre los dos puntos y el texto 
+            content = re.sub(r'(:)(?=(?!\*\*)(?:[\w`]|```))', r'\\1\\n', content)
+
+            # Funciona todo alinea a la misma altura un asterisco con otro asterisco
+            content = re.sub(r'(^.*:\s*\\n)(\*)(\s*\S.*)', r'\\1    \\2\\3', content, flags=re.MULTILINE)
+
+            # Esta expresión regular quitar inserción de saltos de linea innecesarios dentro bloques de código márkdowns
+            content = re.sub(r'```(.*?)\\n(.*?)\\n([ \\t]*\\|.*?)```', r'```\\1\\n\\2 \\3```', content, flags=re.DOTALL)
+            
+            
+            # expresión regular que autoajusta espacios necesarios cabeceras de las tablas markdown
+            # Función de reemplazo
+            def replacer(m):
+                # Si coincidió la parte separadora (?P<sep>)
+                if m.group("sep") is not None:
+                    # Convertir la línea separadora al formato "|--|--|..." según cantidad de columnas
+                    sep_line = m.group("sep").strip()
+                    columns = [col for col in sep_line.split("|") if col.strip()]
+                    return "|" + "|".join(["--"] * len(columns)) + "|"
+                else:
+                    # Sino es la parte de encabezado (?P<header>), quitamos espacios iniciales
+                    return m.group("header").lstrip()
+
+            # Expresión regular aplicada directamente con re.sub()
+            content_modificado = re.sub(r"^(?P<sep>\s*\|(?:\s*[-:]+\s*\|)+\s*)$|^(?P<header>\s+\|(?:[^|]*\|)+.*)$", 
+                                        replacer, 
+                                        content, 
+                                        flags=re.MULTILINE)
+                            
+
             info = {
                 'name': page['path'],
                 'short_name': page['path'].split('/')[-1],
@@ -860,7 +1290,26 @@ else:
 
         document = Document('documento_generado.docx')
 
+        def clean_attachments_folder():
+            ###Elimina todos los archivos en la carpeta .attachments
+            attachments_dir = '.attachments'
+            if os.path.exists(attachments_dir):
+                for file_name in os.listdir(attachments_dir):
+                    file_path = os.path.join(attachments_dir, file_name)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                            print(f"Deleted file: {file_name}")
+                    except Exception as e:
+                        print(f"Failed to delete {file_name}: {e}")
+            else:
+                os.makedirs(attachments_dir)  # Si no existe, la creamos
+        # Limpiar la carpeta .attachments antes de descargar nuevos archivos
+        clean_attachments_folder()
 
+        print("Preparandose para descargar azure wiki GIT")
+
+        print("Se encarga esta función en descargar de forma recursiva los ficheros de GIT azure")
         list_url = f"https://dev.azure.com/{organization}/{project}/_apis/git/repositories/{wiki}/items?scopePath=/.attachments&recursionLevel=full&api-version=5.0"
 
         # Configura la autenticación
@@ -901,110 +1350,52 @@ else:
             else:
                 print("La clave 'value' no está presente en la respuesta de la API.")
         else:
-            print(f"Error al listar archivos: {list_response.status_code}")
+            print(f"Error al listar archivos: {list_response.status_code}. Ese código 404 no te preocupues simplemente en tu wiki no tienes ficheros imágenes de momento")
 
 
     paginaconcreta2()  # Llama a la función paginaconcreta2
 
 
-print("Starting the Word application and opening the document...")
+# Definir las constantes manualmente
+wdStatisticPages = 2
+wdGoToPage = 1
+wdGoToAbsolute = 1
 
+
+print("Starting the Word application and opening the document...")
+        
 try:
-    # Inicializar la aplicación de Word y abrir el documento
-    word_app = win32com.client.Dispatch("Word.Application")
+    # Initialize Word application and open the document
+    word_app = win32com.client.gencache.EnsureDispatch('Word.Application')
     word_app.DisplayAlerts = False
     word_app.Visible = False
+    # Establecer Word en modo sin interfaz gráfica (evitar cualquier ventana emergente)
+    word_app.ScreenUpdating = False
+    word_app.DisplayAlerts = 0  # 0 = No alerts, 1 = alerts (por si acaso)
 except Exception as e:
-    print(f"Se produjo un error al intentar iniciar la aplicación de Word: {e}")
+    print(f"An error occurred while trying to start the Word application: {e}")
+    exit(1)
 
 try:
     file_path = os.path.abspath("documento_generado.docx")
     doc = word_app.Documents.Open(file_path)
 except Exception as e:
-    print(f"Se produjo un error al intentar abrir el documento: {e}")
+    print(f"An error occurred while trying to open the document: {e}")
+    word_app.Quit()
+    exit(1)
 
 
-# Patrón específico que identifica la estructura que nos interesa
-specific_pattern = re.compile(r'(\[.*?\]\(/.*?\))\s*(\d+\.\d+\.\s*.*?$)')
-
-# Compilar las expresiones regulares para los patrones de enlace
-link_patterns = [
-    re.compile(r'\[.*\]\(/.*\)'),  # Enlace tipo1: System-Information-Leak
-    re.compile(r'- \[.*\]\(/.*\)'),  # Enlace tipo2: - System-Information-Leak
-    re.compile(r'- https://.*'),  # Enlace tipo3: - https://www.enlaceprueba.com
-    re.compile(r'!\[.*\]\(https://.*\)')  # Enlace tipo4: !ejemplo otro tipo de enlace
-]
-
-for para in doc.Paragraphs:
-    match = specific_pattern.search(para.Range.Text)
-    if match:
-        # Separar el enlace del título
-        para.Range.Text = match.group(1) + '\\n' + match.group(2)
-        para.Range.Text = match.group(1) + '\\n' + match.group(2)
-        print(f"Insertando salto de párrafo entre '{match.group(1)}' y '{match.group(2)}'...")
-    else:
-        # Si no coincide con el patrón específico, busca otros patrones de enlace
-        for pattern in link_patterns:
-            if pattern.search(para.Range.Text):
-                end_pos = para.Range.End
-                doc.Range(end_pos, end_pos).InsertParagraphAfter()  # Inserta un salto de párrafo
-                doc.Range(end_pos, end_pos).InsertParagraphAfter()  # Inserta un salto de párrafo
-                doc.Range(end_pos, end_pos).InsertParagraphAfter()  # Inserta un salto de párrafo
-                doc.Range(end_pos, end_pos).InsertParagraphAfter()  # Inserta un salto de párrafo
-                doc.Range(end_pos, end_pos).InsertParagraphAfter()  # Inserta un salto de párrafo
-
-# Una segunda pasada para eliminar párrafos vacíos que tienen numeración
-for para in doc.Paragraphs:
-    if para.Range.Text.strip() == '' and para.Range.ListFormat.ListType != 0:  # Párrafo vacío con numeración
-        para.Range.Delete()
-
+# Reemplazo de "↵" por "^p"
 find_object = doc.Content.Find
 find_object.ClearFormatting()
-find_object.Text = '^l'  # '^l' es el código para '↵'
+find_object.Text = '^l'
 find_object.Replacement.ClearFormatting()
-find_object.Replacement.Text = '^p'  # '^p' es el código para '¶'
-find_object.Execute(Replace=2)  # 2 = wdReplaceAll
-
-
-print("procesa saltos de parrafos")
-# Compilar una expresión regular para identificar tus etiquetas HTML específicas y tablas Markdown
-html_tag_pattern = re.compile(r'\([a-zA-Z]+\s*[^)]*\)')
-markdown_table_pattern = re.compile(r'\|\s*(.+?)\s*\|')
-
-# Ejemplos de etiquetas para probar la expresión regular
-ejemplo_etiquetas = [
-    "(b) Texto cualquiera (/b)", 
-    "(span style='color:red') Texto rojo (/span)", 
-    "(span style='color:blue') Texto azul (/span)",
-    "(span style='color:green') Texto verde (/span)",
-    "(div) Otro texto (/div)"
-    "(b)(a color:blue)texto cualquiera(/b)"
-]
-
-        
-# Indicador para saber si ya encontramos la etiqueta
-found_html_tag = False
-
-# Recorrer todos los párrafos del documento
-for paragraph in doc.Paragraphs:
-    if found_html_tag:
-        break  # Salir del bucle si ya encontramos la etiqueta
-
-    # Buscar tablas Markdown
-    if markdown_table_pattern.search(paragraph.Range.Text):
-        # Revisar los párrafos anteriores buscando la etiqueta HTML específica
-        prev_paragraph = paragraph.Previous()
-        while prev_paragraph:
-            if html_tag_pattern.search(prev_paragraph.Range.Text):
-                # Encontramos la etiqueta HTML deseada cerca de una tabla Markdown
-                print("Etiqueta HTML cerca de una tabla Markdown encontrada:", prev_paragraph.Range.Text)
-                prev_paragraph.Range.InsertAfter("\\n")
-                found_html_tag = True  # Indicar que ya encontramos la etiqueta
-                break
-            prev_paragraph = prev_paragraph.Previous()
+find_object.Replacement.Text = '^p'
+find_object.Execute(Replace=2)
 
 
 
+print("Bullet and sub ul li HTML robot tags only matched")
 def verificar_etiquetas(doc):
     # Pila para rastrear las etiquetas de apertura
     pila_etiquetas = []
@@ -1050,19 +1441,18 @@ def eliminar_etiquetas_sueltas(doc):
     return False  # Devolver False si no se encontraron etiquetas sueltas
 
 # Proceso principal
-print("Verificando etiquetas HTML...")
+print("Verifying HTML tags...")
 if verificar_etiquetas(doc):
-    print("Se encontraron etiquetas HTML sueltas. Procediendo a eliminarlas...")
+    print("Loose HTML tags found. Proceeding to eliminate them...")
     if eliminar_etiquetas_sueltas(doc):
-        print("Se eliminaron etiquetas HTML sueltas. Por favor revise en su wiki el orden de las etiquetas HTML emparejadas.")
+        print("Removed loose HTML tags. Please check your wiki for the order of paired HTML tags..")
 else:
-    print("No se encontraron etiquetas HTML sueltas.")
+    print("No loose HTML tags found.")
 
 
-print("Bullet and sub ul li HTML robot etiquetas solamente emparejadas")
+print("Bullet and sub ul li HTML robot tags only matched")
 # Variables para rastrear el estado de las listas, sublistas y bloques de código Markdown
 en_lista = False
-en_sublista = False
 en_bloque_codigo = False
 
 # Primero, verificamos si hay etiquetas sueltas
@@ -1089,7 +1479,7 @@ for par in doc.Paragraphs:
         par.Range.Delete()
         continue
 
-    # Verificar y actualizar el estado de las listas y sublistas
+    # Verificar y actualizar el estado de las listas
     if '(ul)' in paragraph:
         en_lista = True
         par.Range.Delete()
@@ -1098,36 +1488,34 @@ for par in doc.Paragraphs:
         en_lista = False
         par.Range.Delete()
         continue
-    if '(li)' in paragraph:
-        en_sublista = True
-        par.Range.Delete()
-        continue
-    elif '(/li)' in paragraph:
-        en_sublista = False
-        par.Range.Delete()
-        continue
 
-    # Aplicar formato de lista o sublista según corresponda, excepto en bloques de código
+    # Aplicar formato de lista o sublista según corresponda
     if en_lista or paragraph.startswith('- '):
         par.Format.SpaceAfter = 0
         par.Range.ListFormat.ApplyListTemplateWithLevel(
             ListTemplate=par.Range.Application.ListGalleries.Item(1).ListTemplates.Item(1),
             ContinuePreviousList=True,
-            ApplyTo=win32.constants.wdListApplyToWholeList,
+            ApplyTo=constants.wdListApplyToWholeList,
             DefaultListBehavior=win32.constants.wdWord10ListBehavior)
         par.Range.ListFormat.ListLevelNumber = 1
 
-    if en_sublista or paragraph.startswith('  - '):
+    # Aplicar el formato de sublista con círculo blanco (nivel 2)
+    if paragraph.startswith('  - ') or '(li)' in paragraph:
         par.Format.SpaceAfter = 0
         par.Range.ListFormat.ApplyListTemplateWithLevel(
             ListTemplate=par.Range.Application.ListGalleries.Item(1).ListTemplates.Item(1),
             ContinuePreviousList=True,
-            ApplyTo=win32.constants.wdListApplyToWholeList,
+            ApplyTo=constants.wdListApplyToWholeList,
             DefaultListBehavior=win32.constants.wdWord10ListBehavior)
         par.Range.ListFormat.ListLevelNumber = 2
 
+        # Cambiar el símbolo del nivel 2 a un círculo blanco (ChrW(9675))
+        par.Range.ListFormat.ListTemplate.ListLevels(2).NumberFormat = chr(9675)
 
-print("creación de tabla tipo 2 la más nueva")
+
+    
+    
+print("table creation type 2 the newest")
 # Lista para almacenar todas las tablas encontradas
 all_tables_data = []
 
@@ -1156,33 +1544,39 @@ while True:
             start_table = None
             end_table = None
             table_lines = []
+            blank_line_count = 0  # Move this outside the loop
 
             # Búsqueda de tablas en el documento
             for index, para in enumerate(doc.Paragraphs):
                 line = para.Range.Text.strip()
-                placeholders = []  # Añade esta línea para definir 'placeholders'
-                
-                # Verifica si la línea contiene una imagen en formato Markdown rodeada por tuberías
-                if image1_pattern1.search(line):
-                    continue  # Si es así, ignora la línea y pasa a la siguiente
+                placeholders = []  # Definir 'placeholders' si es necesario
 
-                # Ignora las líneas que comienzan con una tubería seguida de cualquier número de espacios y luego '+-' o '-+'
+                # Si la línea contiene una imagen en formato Markdown rodeadas por tuberías, ignórala
+                if image1_pattern1.search(line):
+                    continue
+
+                # Ignorar líneas que contienen un enlace HTML de imgbb (no se debe considerar como encabezado de tabla Markdown)
+                if re.search(r'\(a href="[^"]+"\)\(img src="[^"]+"(?:\s+[^)]*)?\)\(\/a\)', line):
+                    continue
+
+                # Ignorar líneas que comienzan con una tubería seguida de '+-' o '-+'
                 if re.match(r'^\|\s*\+-', line) or re.match(r'^\|\s*-+\+', line):
                     continue
-                
+
                 # Manejar inicio y fin de tabla
-                if "|" in line:
+                if "|" in line and line.lstrip().startswith("|") and len(line.split("|")) > 2:
                     if start_table is None:
                         start_table = index
-                    blank_line_count = 0  # Reiniciar contador de líneas vacías
+                    blank_line_count = 0  # Reiniciar contador de líneas en blanco
                     table_lines.append(line.strip())
-                elif start_table is not None:
-                    # Considerar una línea vacía como posible fin de tabla
-                    if line == '':
+                else:
+                    if start_table is not None:
                         blank_line_count += 1
-                    if blank_line_count > 1:
-                        end_table = index
-                        break
+                        if blank_line_count > 1:
+                            end_table = index
+                            break
+                    continue
+
 
             # Llama a la función para añadir delimitadores faltantes
             table_lines = add_missing_delimiters(table_lines)
@@ -1220,6 +1614,15 @@ while True:
             if header_separator_line_index is not None:
                 del data[header_separator_line_index]
 
+            # Validar si los datos de la tabla están completos
+            if len(data) < 2 or len(data[0]) < 1:
+                print(f"Los datos de la tabla están incompletos: {data}")
+                continue  # Saltar al siguiente ciclo si no hay datos válidos
+
+            # Ajustar el rango para que solo incluya la tabla
+            start_range = None
+            end_range = None
+        
             counter = 0
             for para in doc.Paragraphs:
                 counter += 1
@@ -1229,6 +1632,16 @@ while True:
                     end_range = para.Range.End
                     break
 
+            # Evitar modificar un rango no válido
+            if start_range is not None and end_range is not None and start_range < end_range:
+                table_text = doc.Range(start_range, end_range).Text
+                if "|" not in table_text:
+                    print("El rango no contiene una tabla. Saltando...")
+                    continue
+            else:
+                print(f"Rango no válido: start={start_range}, end={end_range}")
+                continue
+            
             doc.Range(start_range, end_range).Delete()
 
             table_range = doc.Range(start_range, start_range)
@@ -1248,7 +1661,6 @@ while True:
             else:
                 print("The markdown table in this bot is not recognized.")
                 continue  # Continúa con el siguiente ciclo del bucle while si la tabla no se reconoce
-
 
             markdown_link_found_in_table = False  # Añade esta línea para inicializar 'markdown_link_found_in_table' en False
 
@@ -1292,6 +1704,9 @@ while True:
                     print(f"Se produjo un error al procesar la tabla: {e}")
                     break
 
+
+
+
 # Inicializa 'sheet_resized' como False
 sheet_resized = False
 
@@ -1316,8 +1731,7 @@ else:
 
 
 
-print("creación de tablas en word con pywin32 tipo 1 la más sencilla")
-
+print("creating tables in word with pywin32 custom table size")
 # Lista para almacenar todas las tablas encontradas
 all_tables_data = []
 
@@ -1338,26 +1752,31 @@ while True:
     # Búsqueda de tablas en el documento
     for index, para in enumerate(doc.Paragraphs):
         line = para.Range.Text.strip()
-        placeholders = []  # Añade esta línea para definir 'placeholders'
+        placeholders = []  # Definir 'placeholders' si es necesario
         
         # Verifica si la línea contiene una imagen en formato Markdown rodeada por tuberías
         if image1_pattern1.search(line):
             continue  # Si es así, ignora la línea y pasa a la siguiente
 
+        # Ignorar líneas que contienen un enlace HTML de imgbb (no se debe considerar como parte de la tabla Markdown)
+        if re.search(r'\(a href="[^"]+"\)\(img src="[^"]+"(?:\s+[^)]*)?\)\(\/a\)', line):
+            continue
+
         # Ignora las líneas que comienzan con una tubería seguida de cualquier número de espacios y luego '+-' o '-+'
         if re.match(r'^\|\s*\+-', line) or re.match(r'^\|\s*-+\+', line):
             continue
         
-        if "|" in line:
+        if "|" in line and line.lstrip().startswith("|") and len(line.split("|")) > 2:
             if start_table is None:
                 start_table = index
-            # Vuelve a insertar los enlaces originales
+            # Vuelve a insertar los enlaces originales (si fuera necesario)
             for placeholder, match in placeholders:
                 line = line.replace(placeholder, match[0])
             table_lines.append(line.strip())
         elif start_table is not None:
             end_table = index
             break
+
 
     # Si no se encuentra ninguna tabla, se detiene el bucle
     if not table_lines:
@@ -1407,6 +1826,13 @@ while True:
         print("La tabla markdown en este bot no es reconocida.")
         continue
 
+    # Rellenar la tabla con los datos procesados
+    for i, row in enumerate(data):
+        for j, cell in enumerate(row):
+            table.Cell(i + 1, j + 1).Range.Text = cell
+
+    # Añadir la tabla a la lista de todas las tablas encontradas
+    all_tables_data.append(table)
 
     markdown_link_found_in_table = False  # Añade esta línea para inicializar 'markdown_link_found_in_table' en False
 
@@ -1429,42 +1855,120 @@ while True:
                     # Limpia el texto de la celda antes de añadir el hipervínculo.
                     cell_range.Text = text.strip()
                     
-                    
                     hyperlink_range.Find.Execute(FindText=text)
                     doc.Hyperlinks.Add(Anchor=hyperlink_range, Address=url)
                     
-                    
-
+    # Estilo de tabla
     table.Style = "Acc_Table_1"
-    all_tables_data.append(data)
 
 
-# Ajusta el tamaño de las celdas a 1.76 cm (convertido a puntos)
+# Ajusta el tamaño de las celdas a 2.19 cm (convertido a puntos) cuando tiene más de 5 columnas la tabla
 cm_to_points = 2.19 * 28.3465  # 1 cm es aproximadamente 28.3465 puntos
 
-if table is not None:  # Comprueba si 'table' no es None
-    for row in table.Rows:
-        for cell in row.Cells:
-            try:
-                # Ajusta el ancho de la celda
-                cell.Width = cm_to_points
+# Suponiendo que 'doc' ya está definido y es el documento abierto
+# Ajuste del tamaño de las celdas para tablas con 1 a 2 columnas
+for table in doc.Tables:
+    # Obtener el número de página de la tabla actual
+    page_number = table.Range.Information(wdConst.wdActiveEndPageNumber)
+    
+    # Verificar si "Approval flow" está en la segunda página
+    approval_flow_found = False
+    for para in doc.Paragraphs:
+        if "Approval flow" in para.Range.Text:
+            approval_flow_page_number = para.Range.Information(wdConst.wdActiveEndPageNumber)
+            if approval_flow_page_number == 2:  # Comprobar si está en la segunda página
+                approval_flow_found = True
+                break
 
-                # Verifica el ancho de la celda después del ajuste
-                actual_width = cell.Width
+    # Si se encuentra "Approval flow" en la segunda página, omitir las modificaciones a la tabla
+    if approval_flow_found and page_number == 2:
+        print(f"Se encontró 'Approval flow' en la segunda página. La tabla en la página {page_number} no será modificada.")
+        continue
+    
+    # Recorrer los encabezados para encontrar "REFERENCES"
+    title_found = False
+    for para in doc.Paragraphs:
+        if "REFERENCES" in para.Range.Text:
+            title_page_number = para.Range.Information(wdConst.wdActiveEndPageNumber)
+            if title_page_number == page_number:
+                title_found = True
+                break
 
-                # Comprueba si el ancho actual es aproximadamente el esperado
-                if abs(actual_width - cm_to_points) < 1:
-                    print("La celda se ha ajustado correctamente.")
+    # Si se encuentra el título, omite la modificación de tablas en esa página
+    if title_found:
+        print(f"Se encontró el título 'REFERENCES TOC HEADING' en la página {page_number}. No se modificará ninguna tabla en esta página.")
+        continue
+        
+    # Tablas con 1 a 2 columnas
+    if 1 <= table.Columns.Count <= 2:
+        header_height_cm = 2.0  # Ajusta la altura del encabezado en cm
+        cell_width_cm = 8.5  # Ajusta el ancho de las celdas en cm
+
+        # Conversión de cm a puntos
+        header_height_points = header_height_cm * 28.3465
+        cell_width_points = cell_width_cm * 28.3465
+
+        # Ajustar el tamaño de las celdas (tanto el ancho como la altura)
+        for i, row in enumerate(table.Rows):
+            for cell in row.Cells:
+                cell.Width = cell_width_points  # Ancho de todas las celdas
+                if i == 0:  # Si es la fila del encabezado
+                    cell.Height = header_height_points  # Establece la altura del encabezado
+                    cell.HeightRule = wdConst.wdRowHeightExactly  # Establece la altura exacta
                 else:
-                    print("La celda no se ajustó al tamaño esperado.")
+                    cell.HeightRule = wdConst.wdRowHeightAuto  # Altura automática para las otras celdas
+        print(f"Tabla de {table.Columns.Count} columnas ajustada con altura de encabezado de {header_height_cm} cm y ancho de celdas de {cell_width_cm} cm.")
 
-            except Exception as e:
-                print(f"Se produjo un error al intentar ajustar el tamaño de la celda: {e}")
+    # Tablas con 3 a 5 columnas
+    if 3 <= table.Columns.Count <= 5:
+        header_height_cm = 2.0  # Ajusta la altura del encabezado en cm
+        cell_width_cm = 3.5  # Ajusta el ancho de las celdas en cm
+
+        # Conversión de cm a puntos
+        header_height_points = header_height_cm * 28.3465
+        cell_width_points = cell_width_cm * 28.3465
+
+        # Ajustar el tamaño de las celdas (tanto el ancho como la altura)
+        for i, row in enumerate(table.Rows):
+            for cell in row.Cells:
+                cell.Width = cell_width_points  # Ancho de todas las celdas
+                if i == 0:  # Si es la fila del encabezado
+                    cell.Height = header_height_points  # Establece la altura del encabezado
+                    cell.HeightRule = wdConst.wdRowHeightExactly  # Establece la altura exacta
+                else:
+                    cell.HeightRule = wdConst.wdRowHeightAuto  # Altura automática para las otras celdas
+        print(f"Tabla de {table.Columns.Count} columnas ajustada con altura de encabezado de {header_height_cm} cm y ancho de celdas de {cell_width_cm} cm.")
 
 
+    # Tablas con más de 5 columnas
+    elif table.Columns.Count > 5:
+        # Ajuste manual de celdas para tablas con más de 5 columnas
+        cm_to_points = 2.5 * 28.3465  # 1 cm es aproximadamente 28.3465 puntos
+
+        for row in table.Rows:
+            for cell in row.Cells:
+                try:
+                    # Ajusta el ancho de la celda
+                    cell.Width = cm_to_points
+
+                    # Verifica el ancho de la celda después del ajuste
+                    actual_width = cell.Width
+
+                    # Comprueba si el ancho actual es aproximadamente el esperado
+                    if abs(actual_width - cm_to_points) < 1:
+                        print("La celda se ha ajustado correctamente.")
+                    else:
+                        print("La celda no se ajustó al tamaño esperado.")
+
+                except Exception as e:
+                    print(f"Se produjo un error al intentar ajustar el tamaño de la celda: {e}")
+        print(f"Tabla de {table.Columns.Count} columnas ajustada manualmente con un ancho de celdas de 2.4 cm.")
 
 # Inicializa 'sheet_resized' como False
-sheet_resized = False
+
+
+
+print("Aumentando el tamaño de la hoja microsoft word en el caso de pueda ser necesario")
 
 # Recorrer las tablas y aumentar el tamaño de la hoja si hay más de 5 columnas
 for table in doc.Tables:
@@ -1478,7 +1982,7 @@ for table in doc.Tables:
             sheet_resized = True
             break  # Salir del bucle después de la primera tabla encontrada
         except Exception as e:
-            print(f"Se produjo un error al intentar ajustar el tamaño de la hoja: {e}")
+            print(f"An error occurred while trying to adjust the sheet size: {e}")
 
 if sheet_resized:
     print("The document sheet size has been resized.")
@@ -1487,9 +1991,309 @@ else:
 
 
 
+print("Sección comprobación tamaño de hoja y cambio de shape de texto") 
+# Definir factor de conversión de cm a puntos (Word usa puntos como medida)
+cm_to_points = 28.3465
+
+# Tamaño A3 en cm
+a3_width_in_cm = 29.7  # Ancho en cm
+a3_height_in_cm = 42.0  # Alto en cm
+
+# Convertir tamaño A3 a puntos
+a3_width_in_points = a3_width_in_cm * cm_to_points
+a3_height_in_points = a3_height_in_cm * cm_to_points
+
+# Tamaño de ancho absoluto para el cuadro de texto en cm (26.65 cm)
+new_width_in_cm = 26.65
+new_width_in_points = new_width_in_cm * cm_to_points
+
+# Variable para verificar si el tamaño de la hoja fue ajustado
+sheet_resized = False
+
+# Recorrer las tablas y cambiar el tamaño de la hoja a A3 si hay más de 5 columnas
+for table in doc.Tables:
+    if table.Columns.Count > 5:
+        try:
+            # Cambiar el tamaño de la hoja a A3
+            doc.PageSetup.PageWidth = a3_width_in_points
+            doc.PageSetup.PageHeight = a3_height_in_points
+            print(f"Tamaño de las hojas cambiado a A3: {a3_width_in_cm} cm x {a3_height_in_cm} cm.")
+            sheet_resized = True
+            break  # Salir del bucle después de ajustar la primera hoja con una tabla grande
+        except Exception as e:
+            print(f"Error al intentar ajustar el tamaño de las hojas: {e}")
+
+# Si el tamaño de la hoja fue ajustado, buscar el cuadro de texto en la última hoja
+if sheet_resized:
+    print("Ajustando el cuadro de texto en la última hoja...")
+
+    # Obtener todas las formas (Shapes) en el documento completo
+    shapes = doc.Shapes
+
+    if shapes.Count > 0:
+        # Iterar por todas las Shapes para encontrar el cuadro de texto en la última sección
+        for shape in shapes:
+            # Verificar si el Shape es un cuadro de texto y si está en la última sección
+            if shape.TextFrame.HasText:
+                shape_range = shape.Anchor
+                if shape_range.Sections(1).Index == doc.Sections.Count:
+                    try:
+                        # Ajustar el ancho del cuadro de texto
+                        shape.LockAspectRatio = False  # Desbloquear la relación de aspecto
+                        shape.Width = new_width_in_points  # Establecer el ancho en puntos
+                        print(f"El ancho del cuadro de texto ha sido ajustado a {new_width_in_cm} cm.")
+                        break  # Salir del bucle una vez que el cuadro de texto en la última sección sea encontrado
+                    except Exception as e:
+                        print(f"Error al ajustar el tamaño del cuadro de texto: {e}")
+                else:
+                    print("No se encontraron cuadros de texto en la última hoja.")
+    else:
+        print("No se encontraron cuadros de texto en el documento.")
+else:
+    print("El tamaño de las hojas no fue alterado, no se ajustará ningún cuadro de texto.")
+
+
+
+print("medidas personalizadas para el cuadro contenedor de las formas shape en páginas A3")
+active_document = word_app.ActiveDocument
+
+# Factor de conversión de puntos a centímetros
+points_to_cm = 0.0352778
+cm_to_points = 28.3464567  # Conversión de cm a puntos
+
+# Verificar el tamaño de la página en centímetros
+page_width_cm = active_document.PageSetup.PageWidth * points_to_cm
+page_height_cm = active_document.PageSetup.PageHeight * points_to_cm
+
+print(f"Tamaño de la página: {page_width_cm:.2f} cm x {page_height_cm:.2f} cm")
+
+# Verificar si las dimensiones coinciden con el tamaño A3 (29.7 cm x 42.0 cm)
+if abs(page_width_cm - 29.7) < 0.1 and abs(page_height_cm - 42.0) < 0.1:
+    print("La página está en tamaño A3, aplicando configuración...")
+    
+    # Establecer configuración de Layout Position y Layout Size solo para el cuadro contenedor
+    if shapes.Count > 0:
+        container_shape = None
+
+        for shape in shapes:
+            # Verificar si la forma tiene imágenes anidadas
+            if shape.GroupItems.Count > 1:  # Verificar si es un grupo con más de 1 elemento (imágenes anidadas)
+                print(f"Cuadro contenedor encontrado: {shape.Name}, configurando tamaño y posición.")
+                container_shape = shape
+                break  # Detener el bucle después de encontrar el cuadro contenedor
+
+        if container_shape:
+            try:
+                # Establecer Layout Position
+                container_shape.Left = 0  # Posición horizontal absoluta
+                
+                # Convertir 3.93 cm a puntos y verificar el valor
+                top_cm = 3.93
+                top_points = top_cm * cm_to_points
+                print(f"Posición Top (vertical) en centímetros: {top_cm} cm")
+                print(f"Posición Top (vertical) en puntos: {top_points}")
+
+                # Establecer la posición relativa de la página
+                container_shape.RelativeVerticalPosition = constants.wdRelativeVerticalPositionPage
+                container_shape.Top = top_points  # Posición vertical absoluta en puntos
+
+                # Imprimir la posición en centímetros después de establecerla en puntos
+                print(f"Posición Left (horizontal): {container_shape.Left * points_to_cm:.2f} cm")
+                print(f"Posición Top (vertical): {container_shape.Top * points_to_cm:.2f} cm")
+
+                # Verificar la propiedad RelativeVerticalPosition
+                print(f"RelativeVerticalPosition: {container_shape.RelativeVerticalPosition}")
+
+                # Establecer Layout Size
+                container_shape.LockAspectRatio = False  # Desbloquear la relación de aspecto
+                container_shape.Height = 28.16 * cm_to_points  # Establecer la altura en puntos
+                container_shape.Width = 25.2 * cm_to_points  # Establecer el ancho en puntos
+
+                # Imprimir el tamaño en centímetros
+                print(f"Altura (Height): {container_shape.Height * points_to_cm:.2f} cm")
+                print(f"Ancho (Width): {container_shape.Width * points_to_cm:.2f} cm")
+
+                print("Configuración de Layout Position y Layout Size establecida para el cuadro contenedor.")
+            except Exception as e:
+                print(f"Error al establecer la configuración de Layout Position y Layout Size: {e}")
+        else:
+            print("No se encontró ningún cuadro contenedor para aplicar la configuración.")
+else:
+    print("La página no está en tamaño A3. No se aplicarán cambios.")
+
+
+print("Verificando tamaño de la portada y listando shapes...")
+
+def verificar_portada_y_shapes(doc):
+    # Factor de conversión de puntos a cm
+    points_to_cm = 0.0352778
+    cm_to_points = 28.3464567
+
+    try:
+        # Verificar tamaño de la página
+        page_width_cm = doc.PageSetup.PageWidth * points_to_cm
+        page_height_cm = doc.PageSetup.PageHeight * points_to_cm
+
+        print(f"Tamaño de la página: {page_width_cm:.2f} cm x {page_height_cm:.2f} cm")
+        if abs(page_width_cm - 29.7) < 0.1 and abs(page_height_cm - 42.0) < 0.1:
+            print("La página está en tamaño A3.")
+        else:
+            print("La página no está en tamaño A3.")
+        
+        # Iterar sobre shapes y obtener información detallada
+        for shape in shapes:
+            if shape.Type == 6:  # Si es un grupo
+                for item in shape.GroupItems:
+                    if item.Type == 17:  # wdInlineShapeTextBox
+                        pass  # Aquí puedes agregar el código para manejar el TextBox
+                    elif item.Type == 3:  # wdInlineShapePicture
+                        pass  # Aquí puedes agregar el código para manejar la imagen
+            elif shape.Name == "Picture 14":  # Ajustar la posición de la imagen específica
+                target_position_cm = 20
+                current_position_cm = shape.Left * points_to_cm
+                distance_to_move_cm = target_position_cm - current_position_cm
+                distance_to_move_points = distance_to_move_cm * cm_to_points
+                shape.IncrementLeft(distance_to_move_points)
+                print(f"Imagen 'Picture 14' movida a {target_position_cm} cm desde la izquierda.")
+                
+            # Ajustar posición de Rectangle: Rounded Corners 4
+            if shape.Name == "Rectangle: Rounded Corners 4":
+                target_position_cm = 20
+                current_position_cm = shape.Left * points_to_cm
+                distance_to_move_cm = target_position_cm - current_position_cm
+                distance_to_move_points = distance_to_move_cm * cm_to_points
+                shape.IncrementLeft(distance_to_move_points)
+                print(f"'{shape.Name}' movido a {target_position_cm} cm desde la izquierda.")    
+    except Exception as e:
+        print(f"Error en verificación de la portada o shapes: {e}")
+
+# Ejecutar función de verificación
+verificar_portada_y_shapes(doc)
+        
+
+print("Configuración personalizada de tabla en el encabezado para páginas A3")
+
+# Factor de conversión de puntos a centímetros
+points_to_cm = 0.0352778
+cm_to_points = 28.3464567  # Conversión de cm a puntos
+
+# Verificar el tamaño de la página en centímetros
+page_width_cm = active_document.PageSetup.PageWidth * points_to_cm
+page_height_cm = active_document.PageSetup.PageHeight * points_to_cm
+
+print(f"Tamaño de la página: {page_width_cm:.2f} cm x {page_height_cm:.2f} cm")
+
+# Verificar si las dimensiones coinciden con el tamaño A3 (29.7 cm x 42.0 cm)
+if abs(page_width_cm - 29.7) < 0.1 and abs(page_height_cm - 42.0) < 0.1:
+    print("La página está en tamaño A3, aplicando configuración de ancho de tabla...")
+
+    # Intentar acceder a los encabezados de la sección 2 (Principal y Primera Página)
+    try:
+        # Encabezado Principal
+        header_primary = active_document.Sections(2).Headers(win32.constants.wdHeaderFooterPrimary)
+        tables_in_primary_header = [tbl for tbl in header_primary.Range.Tables]
+
+        # Encabezado de la Primera Página
+        header_first_page = active_document.Sections(2).Headers(win32.constants.wdHeaderFooterFirstPage)
+        tables_in_first_page_header = [tbl for tbl in header_first_page.Range.Tables]
+
+        # Aplicar ancho de 24 cm en el encabezado principal
+        if tables_in_primary_header:
+            for table in tables_in_primary_header:
+                table.PreferredWidth = 24 * cm_to_points
+                print("Ancho preferido de la tabla en el encabezado principal ajustado a 24 cm.")
+        else:
+            print("No se encontraron tablas en el encabezado principal de la sección 2.")
+
+        # Aplicar ancho de 24 cm en el encabezado de la primera página
+        if tables_in_first_page_header:
+            for table in tables_in_first_page_header:
+                table.PreferredWidth = 24 * cm_to_points
+                print("Ancho preferido de la tabla en el encabezado de la primera página del documento word ajustado a 24 cm.")
+        else:
+            print("No se encontraron tablas en el encabezado de la primera página de la sección 2.")
+
+    except Exception as e:
+        print(f"Error al acceder al encabezado o ajustar el ancho de la tabla: {e}")
+else:
+    print("La página no está en tamaño A3. No se aplicarán cambios en los encabezados del documento Word.")
+
+
+
+print("Añadiendo menciones azure wiki de color rojo")
+def resaltar_menciones(doc):
+    ###Busca menciones y las cambia a color rojo, eliminando paréntesis si los hay
+    print("Añadiendo menciones azure de color rojo")
+
+    # Expresión regular para identificar las menciones
+    # Casos a cubrir:
+    # - @(ID) donde ID es una secuencia de caracteres
+    # - @Nombre
+    mention_pattern = re.compile(r'@(?:\(([^\)]+)\)|(\w+))')
+
+    # Recorre cada párrafo en el documento
+    for paragraph in doc.Paragraphs:
+        paragraph_text = paragraph.Range.Text
+
+        # Buscar todas las menciones en el párrafo
+        matches = list(mention_pattern.finditer(paragraph_text))
+
+        # Inicializar un offset para ajustar las posiciones después de reemplazos
+        offset = 0
+
+        for match in matches:
+            # Obtener las posiciones inicial y final ajustadas
+            start = match.start() + offset
+            end = match.end() + offset
+
+            full_mention = match.group(0)
+            mention_content = match.group(1) if match.group(1) else match.group(2)
+
+            # Crear la nueva mención sin paréntesis
+            new_mention = f"@{mention_content}"
+
+            # Calcular la diferencia de longitud para ajustar el offset
+            length_diff = len(new_mention) - len(full_mention)
+
+            # Crear un Range para la mención
+            mention_range = paragraph.Range.Duplicate
+            mention_range.SetRange(paragraph.Range.Start + start, paragraph.Range.Start + end)
+
+            # Reemplazar el texto en el rango de la mención
+            mention_range.Text = new_mention
+
+            # Aplicar el color rojo a la mención
+            mention_range.Font.Color = 255  # wdColorRed in Word
+
+            # Actualizar el offset
+            offset += length_diff
+            
+# Llama a la función para resaltar menciones
+resaltar_menciones(doc)
+            
+
+
+print("reemplazo por salto de párrafos con (br)")
+def reemplazar_br_por_salto(doc):
+    ###Reemplaza todas las ocurrencias de (br) por un salto de párrafo en el documento.
+    print("Reemplazando '(br)' por saltos de párrafo")
+
+    # Recorre todos los párrafos en el documento
+    for paragraph in doc.Paragraphs:
+        paragraph_text = paragraph.Range.Text
+
+        # Verifica si el texto contiene '(br)'
+        if '(br)' in paragraph_text:
+            # Reemplaza '(br)' por un salto de párrafo
+            paragraph.Range.Text = paragraph_text.replace('(br)', '\\r')  #   r es un salto de párrafo en Word
+
+# Llama a la función para reemplazar '(br)' por saltos de párrafo
+reemplazar_br_por_salto(doc)
+
+
 print("Formatting blue label b color blue /b")
 # Patrón para buscar las etiquetas con diferentes colores
-pattern = re.compile(r'\\(b\\)\\(a color:blue\\)(.*?)\\(/b\\)')
+pattern = re.compile(r'\(b\)\(a color:blue\)(.*?)\(/b\)')
 
 ## Recorrer todos los párrafos del documento
 for paragraph in doc.Paragraphs:
@@ -1573,6 +2377,9 @@ for para in doc.Paragraphs:
         print(f"Formato aplicado al párrafo: {text_before_formatting.strip()}")
 
 
+
+print("Rename ficheros formato imagen en mayuscula lo convierte en minusculas")
+
 # Función para renombrar archivos en un directorio
 def rename_files_in_directory(directory):
     for filename in os.listdir(directory):
@@ -1580,305 +2387,789 @@ def rename_files_in_directory(directory):
         file_root, file_extension = os.path.splitext(filename)
         # Si la extensión del archivo es .PNG o .JPG
         if file_extension.upper() in ['.PNG', '.JPG']:
-            new_filename = f"{file_root}{file_extension.lower()}"
+            # Reemplazar espacios con guiones en el nombre del archivo
+            new_file_root = file_root.replace(' ', '_')
+            new_filename = f"{new_file_root}{file_extension.lower()}"
+
             # Renombrar el archivo
-            os.rename(os.path.join(directory, filename), os.path.join(directory, new_filename))
-            print(f"¡File successfully renamed to {new_filename}!")
-
-
-print("etiquetas ya automaticas de colores html")
-
-# Mapea los nombres de los colores a sus correspondientes valores RGB
-colores = {
-    'azul': win32api.RGB(0, 0, 255),
-    'blue': win32api.RGB(0, 0, 255),
-    'yellow': win32api.RGB(255, 255, 0),
-    'amarillo': win32api.RGB(255, 255, 0),
-    'verde': win32api.RGB(0, 128, 0),
-    'green': win32api.RGB(0, 128, 0),
-    'marrón': win32api.RGB(165, 42, 42),  # Definir el color marrón usando RGB
-    'brown': win32api.RGB(165, 42, 42),  # Definir el color marrón usando RGB
-    'rosa': win32api.RGB(255, 105, 180),
-    'pink': win32api.RGB(255, 105, 180),
-    'rojo': win32api.RGB(255, 0, 0),
-    'red': win32api.RGB(255, 0, 0),
-    'crimson': win32api.RGB(220, 20, 60),  # Color Crimson
-    'teal': win32api.RGB(0, 128, 128),     # Color Teal
-    'purple': win32api.RGB(128, 0, 128),   # Color Purple
-    'violeta': win32api.RGB(128, 0, 128),   # Color Violeta
-    'colour': win32api.RGB(0, 0, 0),        # Color Negro para colour
-    'black': win32api.RGB(0, 0, 0)
-}
-
-
-def aplicar_formatos(rango, texto):
-    # Procesar etiquetas de color
-    color_matches = re.findall(r'\(span style="color:(.*?)".*?\)(.*?)\(/span\)', texto, re.IGNORECASE)
-    for match in color_matches:
-        color_original = match[0]
-        color = color_original.lower() 
-        content = match[1]
-        # Comprueba si el color está en el diccionario de colores
-        if color in colores:
             try:
-                rango.Font.Color = colores[color]
+                os.rename(os.path.join(directory, filename), os.path.join(directory, new_filename))
+                print(f"¡File successfully renamed!")
             except Exception as e:
-                print(f"No se pudo cambiar el color: {e}")
-            etiqueta_original = f'(span style="color:{color_original}")'
-            texto = texto.replace(etiqueta_original, '', 1)
-            texto = texto.replace('(/span)', '', 1)
-        else:
-            print(f"Color desconocido: {color}")
+                print(f"Error renaming {filename}: {e}")
 
-    # Procesar etiquetas de negrita
-    bold_matches = re.findall(r'\(b\)(.*?)\(/b\)', texto, re.IGNORECASE)
-    for match in bold_matches:
-        rango.Font.Bold = constants.wdToggle
-        texto = texto.replace('(b)', '').replace('(/b)', '')
+# Obtener la ruta del directorio actual y unirla con .attachments
+current_directory = os.path.dirname(os.path.abspath(__file__))
+directory_path = os.path.join(current_directory, '.attachments')
 
-    return texto
-
-# Aplicar formatos en párrafos
-for i in range(len(doc.Paragraphs), 0, -1):
-    paragraph = doc.Paragraphs.Item(i)
-    text = paragraph.Range.Text
-
-    # Ignorar si no hay etiquetas HTML o si está en un campo especial
-    if not re.search(r'\(span style="color:(.*?)".*?\)(.*?)\(/span\)|\(b\)(.*?)\(/b\)', text, re.IGNORECASE) or paragraph.Range.Fields.Count > 0:
-        continue
-
-    # Aplicar formatos y actualizar el texto del párrafo
-    new_text = aplicar_formatos(paragraph.Range, text)
-    if i <= len(doc.Paragraphs):
-        doc.Paragraphs.Item(i).Range.Text = new_text
-
-# Aplicar formatos en tablas
-for table in doc.Tables:
-    for row in table.Rows:
-        for cell in row.Cells:
-            cell_text = cell.Range.Text
-            # Aplicar formatos y actualizar el texto de la celda
-            new_cell_text = aplicar_formatos(cell.Range, cell_text)
-            cell.Range.Text = new_cell_text
+# Llamar a la función con la ruta del directorio
+rename_files_in_directory(directory_path)
 
 
-# Compilar la expresión regular para buscar imágenes en formato Markdown
+
+print("Descarga imágenes y luego las pone en el documento Word, manejando enlaces con y sin PIPES.")
+
 image_pattern_with_pipes = re.compile(r'\|!\[([^\]]*)\]\(([^)]+)\)\|')
 image_pattern_without_pipes = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Comprobar si el directorio '.attachments' existe
 attachments_dir = os.path.join(script_dir, ".attachments")
+
 if not os.path.isdir(attachments_dir):
-    print(f"Image directory does not exist: {attachments_dir}")
+    print(f"El directorio de imágenes no existe: {attachments_dir}")
 else:
-    print(f".attachments directory exists: {attachments_dir}")
-
-    # Renombrar los archivos en el directorio '.attachments'
-    rename_files_in_directory(attachments_dir)
-
-    # Enumerando todos los archivos en el directorio .attachments
+    print(f"Directorio .attachments encontrado: {attachments_dir}")
     attachment_files = os.listdir(attachments_dir)
 
+def insert_image_with_pipes(doc, match_range, image_path):
+
+    try:
+        # Eliminar el texto de la coincidencia encontrada
+        match_range.Delete()
+        
+        # Crear un rango de inserción
+        insertion_range = match_range.Duplicate
+        insertion_range.Collapse(0)
+        
+        # Máxima altura permitida (6 cm)
+        max_height = 6 * 28.3465  # 6 cm en puntos
+        max_width_cm = 15  # Umbral de ancho en cm
+        max_width_points = max_width_cm * 28.3465  # Convertir a puntos
+
+        # Crear tabla temporal para medir la imagen
+        temp_table = doc.Tables.Add(insertion_range, 1, 1)
+        temp_table.Borders.Enable = False  # Sin bordes temporales
+        
+        # Insertar imagen temporal para medir dimensiones
+        image_cell = temp_table.Cell(1, 1)
+        image = image_cell.Range.InlineShapes.AddPicture(
+            FileName=image_path,
+            LinkToFile=False,
+            SaveWithDocument=True
+        )
+        
+        # Ajustar solo la altura de la imagen a 6 cm (sin tocar el ancho)
+        if image.Height > max_height:
+            image.Height = max_height  # Solo altura ajustada
+        
+        # Guardar ancho ajustado
+        image_width = image.Width  # Ancho permanece intacto
+        
+        # Eliminar tabla temporal
+        temp_table.Delete()
+        
+        # Crear nueva tabla según el ancho ajustado
+        if image_width < max_width_points:  # Imagen más estrecha que 15 cm
+            # Crear tabla con 3 filas y 1 columna (fila inferior dividida en 2 columnas)
+            table = doc.Tables.Add(insertion_range, 3, 1)
+            table.Borders.Enable = False  # Mostrar bordes para diagnóstico
+            
+            # Configurar fila superior vacía (pipeline superior omitido para < 15 cm)
+            table.Rows(1).Height = 1
+            table.Cell(1, 1).Range.Text = ""  # Fila superior sin contenido
+            
+            # Fila central para la imagen
+            image_cell = table.Cell(2, 1)
+            image = image_cell.Range.InlineShapes.AddPicture(
+                FileName=image_path,
+                LinkToFile=False,
+                SaveWithDocument=True
+            )
+            
+            # Ajustar solo la altura (sin modificar el ancho)
+            if image.Height > max_height:
+                image.Height = max_height  # Solo altura ajustada
+            
+            # Fila inferior con dos pipelines
+            table.Cell(3, 1).Split(1, 2)  # Dividir celda en dos columnas
+            
+            # Ajustar el ancho de la tabla al ancho de la imagen
+            table.PreferredWidth = image_width  # Ancho total de la tabla igual al ancho de la imagen
+            
+            # Ajustar las celdas izquierda y derecha
+            # Hacemos que la celda derecha sea proporcional al contenido del pipeline
+            table.Cell(3, 1).Width = image_width / 2 - 1  # Reducir ancho de la celda izquierda
+            table.Cell(3, 2).Width = image_width / 2 - 1  # Reducir ancho de la celda derecha
+            
+            # Ajustar márgenes internos de las celdas
+            table.Cell(3, 1).Range.ParagraphFormat.LeftIndent = 0
+            table.Cell(3, 1).Range.ParagraphFormat.RightIndent = 0
+            
+            table.Cell(3, 2).Range.ParagraphFormat.LeftIndent = 0  # Sin margen interno izquierdo
+            table.Cell(3, 2).Range.ParagraphFormat.RightIndent = 0
+            
+            # Pipeline inferior izquierdo
+            table.Cell(3, 1).Range.Text = "|"  
+            table.Cell(3, 1).Range.ParagraphFormat.Alignment = wdConst.wdAlignParagraphLeft
+            
+            # Pipeline inferior derecho
+            table.Cell(3, 2).Range.Text = "|"
+            table.Cell(3, 2).Range.ParagraphFormat.Alignment = wdConst.wdAlignParagraphLeft  # Pegado al borde izquierdo
+        else:
+            # Imagen más ancha o igual a 15 cm: tabla simple con pipelines en esquinas superior e inferior izquierdas
+            table = doc.Tables.Add(insertion_range, 3, 1)
+            table.Borders.Enable = False  # Mostrar bordes para diagnóstico
+            
+            # Fila superior con pipeline
+            table.Cell(1, 1).Range.Text = "|"  # Pipeline superior izquierdo
+            table.Cell(1, 1).Range.ParagraphFormat.Alignment = wdConst.wdAlignParagraphLeft
+            table.Cell(1, 1).Range.ParagraphFormat.SpaceBefore = 0
+            table.Cell(1, 1).Range.ParagraphFormat.SpaceAfter = 0
+            
+            # Fila central para la imagen
+            image_cell = table.Cell(2, 1)
+            image = image_cell.Range.InlineShapes.AddPicture(
+                FileName=image_path,
+                LinkToFile=False,
+                SaveWithDocument=True
+            )
+            
+            # Ajustar solo la altura (sin modificar el ancho)
+            if image.Height > max_height:
+                image.Height = max_height  # Solo altura ajustada
+            
+            # Fila inferior con pipeline
+            table.Cell(3, 1).Range.Text = "|"  # Pipeline inferior izquierdo
+            table.Cell(3, 1).Range.ParagraphFormat.Alignment = wdConst.wdAlignParagraphLeft
+            table.Cell(3, 1).Range.ParagraphFormat.SpaceBefore = 0
+            table.Cell(3, 1).Range.ParagraphFormat.SpaceAfter = 0
+
+        # Ajustar automáticamente el ancho de las columnas
+        table.Columns.AutoFit()
+        return True
+    except Exception as e:
+        print(f"Error al insertar la imagen: {e}")
+        return False
+
+def insert_image_without_pipes(doc, match_range, image_path):
+    try:
+        match_range.Delete()
+        image = match_range.InlineShapes.AddPicture(
+            FileName=image_path,
+            LinkToFile=False,
+            SaveWithDocument=True
+        )
+        max_height = 6 * 28.3465
+        if image.Height > max_height:
+            image.Height = max_height
+        match_range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+        return True
+    except Exception as e:
+        print(f"Error al insertar la imagen: {e}")
+        return False
+
 try:
-    # Buscar y reemplazar imágenes en formato Markdown con imágenes incrustadas
-    for paragraph in doc.Paragraphs:
+    paragraphs = list(doc.Paragraphs)
+    for paragraph in paragraphs:
         match_with_pipes = image_pattern_with_pipes.search(paragraph.Range.Text)
         match_without_pipes = image_pattern_without_pipes.search(paragraph.Range.Text)
+
         if match_with_pipes or match_without_pipes:
             if match_with_pipes:
                 description = match_with_pipes.group(1)
                 image_path_markdown = match_with_pipes.group(2).lstrip('/')
-            elif match_without_pipes:
+                has_pipes = True
+                match = match_with_pipes
+            else:
                 description = match_without_pipes.group(1)
                 image_path_markdown = match_without_pipes.group(2).lstrip('/')
+                has_pipes = False
+                match = match_without_pipes
 
-            # Ignorar enlaces externos
-            if image_path_markdown.startswith("http") or image_path_markdown.startswith("https"):
+            image_path_markdown = re.sub(r'\s*=\d+[xX]\d*', '', image_path_markdown)
+            if image_path_markdown.startswith(("http", "https")):
                 continue
 
-            # Extraer solo el nombre del archivo y la extensión del enlace de Markdown
-            file_name_ext = os.path.basename(urllib.parse.unquote(image_path_markdown))
+            image_path_markdown = urllib.parse.unquote(image_path_markdown)
+            file_name_ext = os.path.basename(image_path_markdown)
+            file_name_ext = file_name_ext.replace(' ', '_')  # Ensure spaces are replaced with underscores
 
-            # Comprobar si el archivo se encuentra en la lista 'attachment_files'
             if file_name_ext in attachment_files:
                 image_path = os.path.join(attachments_dir, file_name_ext)
+                match_start = match.start()
+                match_end = match.end()
+                match_range = paragraph.Range.Duplicate
+                match_range.Start = paragraph.Range.Start + match_start
+                match_range.End = paragraph.Range.Start + match_end
 
-                paragraph.Range.Delete()
-
-                image_paragraph = doc.Paragraphs.Add(paragraph.Range)
-                image_paragraph.Format.Style = doc.Styles.Item("Normal")
-                image_range = image_paragraph.Range
-                try:
-                   image_range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
-                except Exception as e:
-                    print(f"Se produjo un error al intentar alinear el párrafo de la imagen: {e}")
-
-                if os.path.exists(image_path):
-                    print(f"The image path exists:: {image_path}")
-                    try:
-                        image = image_range.InlineShapes.AddPicture(FileName=image_path, LinkToFile=False, SaveWithDocument=True)
-                    except Exception as e:
-                        print(f"Error al insertar la imagen: {e}")
-                        continue
+                if has_pipes:
+                    if insert_image_with_pipes(doc, match_range, image_path):
+                        print(f"Imagen insertada correctamente con pipes: {file_name_ext}")
+                    else:
+                        print(f"Imagen saltada o error al insertar: {file_name_ext}")
                 else:
-                    print(f"El archivo de imagen no se encuentra en la ruta especificada: {image_path}")
-                    continue
-
-                max_height = 6 * 28.3465
-                if image.Height > max_height:
-                    image.Height = max_height
-
+                    if insert_image_without_pipes(doc, match_range, image_path):
+                        print(f"Imagen insertada correctamente sin pipes: {file_name_ext}")
+                    else:
+                        print(f"Imagen saltada o error al insertar: {file_name_ext}")
 
 except Exception as e:
-    print(f"Capturada una excepción al procesar imágenes: {e}")
-    print(f"Excepción capturada en el párrafo: {paragraph.Range.Text}")
+    print(f"Se capturó una excepción al procesar imágenes: {e}")
+    try:
+        print(f"Excepción capturada en el párrafo: {paragraph.Range.Text}")
+    except:
+        print("No se pudo obtener el texto del párrafo.")
     print(f"Detalles de la excepción: {e}")
-           
 
-# Compilar la expresión regular para buscar imágenes en formato Markdown con URL completa
-image_pattern = re.compile(r'!\[([^\]]*)\]\((http[s]?://[^)]+)\)')
+   
+   
+print("imagenes con enlaces html página imgbb img SRC ")
+def procesar_imagenes_html(doc):
+    import os, re, requests
+    from urllib.parse import unquote
+    import win32com.client as win32
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    attachments_dir = os.path.join(script_dir, ".attachments")
+
+    if not os.path.isdir(attachments_dir):
+        os.makedirs(attachments_dir)
+        print(f"Directorio .attachments creado: {attachments_dir}")
+    else:
+        print(f"Directorio .attachments encontrado: {attachments_dir}")
+
+    # Expresión regular para buscar el formato peculiar img src para la página llamada imgbb
+    img_pattern = re.compile(r'\(a href="[^"]+"\)\(img src="([^"]+)"[^>]*\/\)\(\/a\)')
+    paragraphs = list(doc.Paragraphs)
+
+    for paragraph in paragraphs:
+        match = img_pattern.search(paragraph.Range.Text)
+        if match:
+            img_url = match.group(1)
+            print(f"Encontrada imagen: {img_url}")
+
+            try:
+                response = requests.get(img_url)
+                if response.status_code == 200:
+                    # Obtención y normalización del nombre de imagen
+                    img_name = unquote(os.path.basename(img_url))
+                    img_name = img_name.replace(' ', '_')
+                    img_path = os.path.join(attachments_dir, img_name)
+
+                    with open(img_path, 'wb') as img_file:
+                        img_file.write(response.content)
+                    print(f"Imagen descargada y guardada: {img_path}")
+
+                    # Eliminamos el contenido del match (la sintaxis markdown) para reemplazarlo
+                    match_range = paragraph.Range.Duplicate
+                    match_range.Start = paragraph.Range.Start + match.start()
+                    match_range.End = paragraph.Range.Start + match.end()
+                    match_range.Delete()
+
+                    # Opcional: Insertamos un párrafo antes para separar la imagen del contenido anterior.
+                    paragraph.Range.InsertParagraphBefore()
+
+                    # Creamos la tabla directamente en el rango del párrafo actual.
+                    # Se usará para insertar los pipelines en la fila superior e inferior y la imagen en la central.
+                    max_height = 6 * 28.3465  # 6 cm en puntos
+                    table = doc.Tables.Add(paragraph.Range, 3, 1)
+                    table.Borders.Enable = False  # Sin bordes
+
+                    # Fila superior: Pipeline en la esquina superior izquierda.
+                    cell_sup = table.Cell(1, 1)
+                    cell_sup.Range.Text = "|"
+                    cell_sup.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+                    cell_sup.Range.ParagraphFormat.SpaceBefore = 0
+                    cell_sup.Range.ParagraphFormat.SpaceAfter = 0
+
+                    # Fila central: Insertamos la imagen.
+                    cell_img = table.Cell(2, 1)
+                    image = cell_img.Range.InlineShapes.AddPicture(
+                        FileName=img_path,
+                        LinkToFile=False,
+                        SaveWithDocument=True
+                    )
+                    if image.Height > max_height:
+                        image.Height = max_height
+                    cell_img.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+
+                    # Fila inferior: Pipeline en la esquina inferior izquierda.
+                    cell_inf = table.Cell(3, 1)
+                    cell_inf.Range.Text = "|"
+                    cell_inf.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+                    cell_inf.Range.ParagraphFormat.SpaceBefore = 0
+                    cell_inf.Range.ParagraphFormat.SpaceAfter = 0
+
+                    # Autoajustar las columnas de la tabla
+                    table.Columns.AutoFit()
+
+                    print(f"Imagen insertada en el documento con pipelines: {img_name}")
+                else:
+                    print(f"Error al descargar la imagen: {img_url}")
+            except Exception as e:
+                print(f"Error al procesar la imagen {img_url}: {e}")
+
+# Ejecución de la función
+procesar_imagenes_html(doc)
 
 
-# Añadir una variable al inicio de tu script para llevar un seguimiento
-message_shown = False
 
-# Buscar y reemplazar imágenes en formato Markdown con imágenes incrustadas
-for paragraph in doc.Paragraphs:
-    match = image_pattern.search(paragraph.Range.Text)
-    if match:
-        # Si el mensaje aún no se ha mostrado, mostrarlo y actualizar la variable
-        if not message_shown:
-            print("Please wait a moment user, the script is performing very complex tasks...")
-            message_shown = True
 
-        # Obtener la descripción y la URL de la imagen
-        description = match.group(1)
-        image_url = match.group(2)
+print("Imágenes con enlaces html página postimg.cc")
 
-        paragraph.Range.Delete()
+def procesar_imagenes_html(doc):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    attachments_dir = os.path.join(script_dir, ".attachments")
 
-        # Crear un nuevo párrafo con estilo "Normal" para insertar la imagen
-        image_paragraph = doc.Paragraphs.Add(paragraph.Range)
-        image_paragraph.Format.Style = doc.Styles.Item("Normal")
+    if not os.path.isdir(attachments_dir):
+        os.makedirs(attachments_dir)
+        print(f"Directorio .attachments creado: {attachments_dir}")
+    else:
+        print(f"Directorio .attachments encontrado: {attachments_dir}")
 
-        
-        image_range = image_paragraph.Range
-        image_range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
-        image = image_range.InlineShapes.AddPicture(FileName=image_url, LinkToFile=False, SaveWithDocument=True)
+    # Expresión regular modificada para la estructura con paréntesis:
+    # (a href='...')(img src='...'/)(/a)
+    # Se permite que no haya caracteres entre (img y src=, usando [^)]* en lugar de [^)]+.
+    img_pattern = re.compile(
+        r"\(a\s+[^)]+\)\(img\s+[^)]*src=['\\"]([^'\\"]+)['\\"][^)]*\)\(/a\)",
+        re.IGNORECASE
+    )
 
-        # Ajustar la altura de la imagen a un máximo de 6 cm (6 cm * 28.3465 puntos/cm = 170.078 puntos)
-        max_height = 6 * 28.3465
-        if image.Height > max_height:
-            image.Height = max_height
+    paragraphs = list(doc.Paragraphs)
+    encontrado = False
 
-        # Agregar un subtítulo a la imagen si se proporcionó una descripción
-        if description:        
-            # Crear un nuevo párrafo con estilo "Normal" para insertar la descripción
-            desc_paragraph = doc.Paragraphs.Add(image_range)
-            desc_paragraph.Range.Text = f"\\n{description}"
-            desc_paragraph.Format.Alignment = win32.constants.wdAlignParagraphCenter
+    for paragraph in paragraphs:
+        texto = paragraph.Range.Text
+        match = img_pattern.search(texto)
+        if match:
+            encontrado = True
+            img_url = match.group(1)
+            print(f"Encontrada imagen: {img_url}")
 
+            try:
+                response = requests.get(img_url)
+                if response.status_code == 200:
+                    img_name = unquote(os.path.basename(img_url))
+                    img_name = img_name.replace(' ', '_')
+                    img_path = os.path.join(attachments_dir, img_name)
+
+                    with open(img_path, 'wb') as img_file:
+                        img_file.write(response.content)
+                    print(f"Imagen descargada y guardada: {img_path}")
+
+                    # Eliminar el fragmento de texto que contiene el enlace con la imagen
+                    match_range = paragraph.Range.Duplicate
+                    match_range.Start = paragraph.Range.Start + match.start()
+                    match_range.End = paragraph.Range.Start + match.end()
+                    match_range.Delete()
+
+                    # Insertar un párrafo antes para separar la imagen del contenido previo
+                    paragraph.Range.InsertParagraphBefore()
+
+                    max_height = 6 * 28.3465
+                    image = paragraph.Range.InlineShapes.AddPicture(
+                        FileName=img_path,
+                        LinkToFile=False,
+                        SaveWithDocument=True
+                    )
+                    if image.Height > max_height:
+                        image.Height = max_height
+                    paragraph.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                    print(f"Imagen insertada en el documento: {img_name}")
+                else:
+                    print(f"Error al descargar la imagen: {img_url} - Estado: {response.status_code}")
+            except Exception as e:
+                print(f"Error al procesar la imagen {img_url}: {e}")
+    
+    if not encontrado:
+        print("No se encontró ninguna imagen con el patrón especificado.")
+
+procesar_imagenes_html(doc)
+
+
+
+
+
+print("Descargar imágenes HTML formato específico de la página www.photo-pick.com (formato y medidas adaptadas)")
+
+def procesar_imagenes_photopick(doc):
+    import os, re, requests, win32com.client as win32
+    from bs4 import BeautifulSoup
+    from urllib.parse import unquote  # Para decodificar correctamente nombres si hace falta
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    attachments_dir = os.path.join(script_dir, ".attachments")
+    if not os.path.isdir(attachments_dir):
+        os.makedirs(attachments_dir)
+        print(f"📂 Directorio .attachments creado: {attachments_dir}")
+    else:
+        print(f"📂 Directorio .attachments encontrado: {attachments_dir}")
+
+    # Regex para detectar enlaces .link
+    link_pattern = re.compile(
+        r'\(a href="https://www\.photo-pick\.com/online/([^"]+)\.link"\)\s*'
+        r'\(img src="[^"]+" alt="([^"]+)"[^\)]*/\)\s*'
+        r'\(/a\)',
+        re.IGNORECASE
+    )
+
+    paragraphs = list(doc.Paragraphs)
+    total_paragraphs = len(paragraphs)
+    idx = 0
+
+    session = requests.Session()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    while idx < total_paragraphs - 2:
+        text_block = (
+            paragraphs[idx].Range.Text.strip() +
+            paragraphs[idx + 1].Range.Text.strip() +
+            paragraphs[idx + 2].Range.Text.strip()
+        )
+
+        match = link_pattern.search(text_block)
+        if match:
+            photo_id = match.group(1)
+            alt_text = match.group(2)
+            page_url = f"https://www.photo-pick.com/online/{photo_id}.link"
+            print(f"🔗 Procesando página imagen: {page_url}")
+
+            try:
+                resp_page = session.get(page_url, headers=headers, timeout=15)
+                if resp_page.status_code != 200:
+                    print(f"❌ Error HTTP {resp_page.status_code} al descargar la página HTML")
+                    idx +=3
+                    continue
+
+                soup = BeautifulSoup(resp_page.text, 'html.parser')
+                meta_img = soup.find('meta', attrs={'property':'og:image'})
+                if meta_img and meta_img.get('content'):
+                    real_image_url = meta_img['content']
+                    print(f"✅ URL Imagen grande encontrada: {real_image_url}")
+                else:
+                    print("❌ URL de imagen no encontrada en el HTML")
+                    idx +=3
+                    continue
+
+                response_img = session.get(real_image_url, headers=headers, stream=True, timeout=15)
+                if response_img.status_code == 200 and 'image' in response_img.headers.get('content-type', ''):
+                    # Generar nombre archivo seguro usando urllib.parse.unquote como en tu ejemplo anterior
+                    img_name = unquote(os.path.basename(real_image_url)).replace(' ', '_')
+                    if not img_name.lower().endswith((".jpg", ".jpeg", ".png")):
+                        img_name += ".jpg"
+                    img_path = os.path.join(attachments_dir, img_name)
+
+                    with open(img_path, 'wb') as f:
+                        for chunk in response_img.iter_content(1024):
+                            f.write(chunk)
+                    print(f"✅ Imagen correctamente descargada: {img_path}")
+
+                    # Eliminar claramente el HTML original (3 párrafos)
+                    paragraphs[idx + 2].Range.Delete()
+                    paragraphs[idx + 1].Range.Delete()
+                    paragraphs[idx].Range.Delete()
+
+                    # Añadir nuevo párrafo para insertar imagen (exactamente como tu ejemplo anterior)
+                    new_paragraph = paragraphs[idx].Range
+                    new_paragraph.InsertParagraphBefore()  # nuevo párrafo claramente separado
+                    paragraphs = list(doc.Paragraphs)
+                    img_paragraph = paragraphs[idx + 1]
+
+                    # Insertar la imagen con altura máxima claramente 6 cm
+                    max_height = 6 * 28.3465  # 6 cm a puntos
+                    inserted_img = img_paragraph.Range.InlineShapes.AddPicture(
+                        FileName=img_path,
+                        LinkToFile=False,
+                        SaveWithDocument=True
+                    )
+                    if inserted_img.Height > max_height:
+                        inserted_img.Height = max_height
+                    
+                    img_paragraph.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                    print(f"🖼️ Imagen insertada en el documento Word (6 cm altura): {img_name}")
+
+                    paragraphs = list(doc.Paragraphs)
+                    total_paragraphs = len(paragraphs)
+                    idx -= 1 if idx > 0 else 0
+                else:
+                    print("❌ Falló :( al descargar imagen real")
+            except Exception as e:
+                print(f"🚨 Error desconocido: {str(e)}")
+
+            idx +=3  # avanzar (hemos procesado tres párrafos)
+        else:
+            idx +=1  # avanzar 1 párrafo (no hay match aquí)
+    session.close()
+
+print("✅ Proceso terminado perfectamente.")
+
+# Finalmente ejecutas la función
+procesar_imagenes_photopick(doc)
+
+
+
+                
+
+print("Convirtiendo enlaces Markdown a hipervínculos de Word...")
+
+# Expresiones regulares para distintos tipos de enlaces
+markdown_pattern = r"(?<!\!)\[(?!https?://)(.*?)\]\((?!url:)(.*?)\)"
+url_pattern = r"(https?://[^\s\)]+)"
+markdown_http_pattern = r"\[(https?://[^\]]+?)\]\(\)"  # Nueva expresión regular
+
+# Variables para detección de bloques de código
+in_codeblock = False
+
+# Recorrer todos los párrafos
+for i in range(1, doc.Paragraphs.Count + 1):
+    paragraph = doc.Paragraphs.Item(i)
+    paragraph_text = paragraph.Range.Text
+
+    # Verificar si hemos encontrado el inicio o fin de un bloque de código con "```"
+    if '```' in paragraph_text:
+        in_codeblock = not in_codeblock
+        continue  # Si es un delimitador de bloque de código, lo ignoramos y pasamos al siguiente párrafo
+
+    # Si estamos dentro de un bloque de código, no procesamos el texto
+    if in_codeblock:
+        continue
+
+    # Procesar el nuevo tipo de enlace `[http://loquesea]()`
+    http_matches = list(re.finditer(markdown_http_pattern, paragraph_text))
+    if http_matches:
+        for match in reversed(http_matches):
+            url = match.group(1).strip()
+
+            # Posición en el texto
+            start = paragraph.Range.Start + match.start()
+            end = paragraph.Range.Start + match.end()
+
+            # Validar el rango
+            if start < paragraph.Range.End:
+                match_range = doc.Range(Start=start, End=end)
+                try:
+                    # Reemplazar el enlace Markdown con la URL como texto visible
+                    match_range.Text = url
+                    # Actualizar el rango para abarcar solo el nuevo texto
+                    match_range = doc.Range(Start=start, End=start + len(url))
+                    # Añadir el hipervínculo
+                    hyperlink = doc.Hyperlinks.Add(Anchor=match_range, Address=url, TextToDisplay=url)
+                    # Aplicar formato azul y subrayado al rango del hipervínculo
+                    hyperlink.Range.Font.ColorIndex = constants.wdBlue
+                    hyperlink.Range.Font.Underline = constants.wdUnderlineSingle
+                except Exception as e:
+                    print(f"Error añadiendo hipervínculo para '{url}': {e}")
+
+    # Procesar enlaces Markdown regulares
+    matches = list(re.finditer(markdown_pattern, paragraph_text))
+    if matches:
+        for match in reversed(matches):
+            display_text = match.group(1).strip()
+            url = match.group(2).strip()
+            if not url:
+                url = display_text
+            start = paragraph.Range.Start + match.start()
+            end = paragraph.Range.Start + match.end()
+            if start < paragraph.Range.End:
+                match_range = doc.Range(Start=start, End=end)
+                try:
+                    match_range.Text = display_text
+                    match_range = doc.Range(Start=start, End=start + len(display_text))
+                    hyperlink = doc.Hyperlinks.Add(Anchor=match_range, Address=url, TextToDisplay=display_text)
+                    hyperlink.Range.Font.ColorIndex = constants.wdBlue
+                    hyperlink.Range.Font.Underline = constants.wdUnderlineSingle
+                except Exception as e:
+                    print(f"Error añadiendo hipervínculo para '{display_text}': {e}")
+
+    # Procesar URLs planas
+    url_matches = list(re.finditer(url_pattern, paragraph_text))
+    if url_matches:
+        for match in reversed(url_matches):
+            url = match.group(0)
+
+            # Limpieza de paréntesis o corchetes al final del enlace
+            url = url.rstrip("])(")
+
+            display_text = url
+            start = paragraph.Range.Start + match.start()
+            end = paragraph.Range.Start + match.end()
+            if start < paragraph.Range.End:
+                match_range = doc.Range(Start=start, End=end)
+                try:
+                    hyperlink = doc.Hyperlinks.Add(Anchor=match_range, Address=url, TextToDisplay=display_text)
+                    hyperlink.Range.Font.ColorIndex = constants.wdBlue
+                    hyperlink.Range.Font.Underline = constants.wdUnderlineSingle
+                except Exception as e:
+                    print(f"Error añadiendo hipervínculo para '{url}': {e}")
+
+
+
+print("aplicar código markdown normal")
+# Función para crear colores RGB
+def RGB(r, g, b):
+    return r + (g << 8) + (b << 16)
 
 # Variables para detección de bloques de código
 found_codeblock = False
 in_codeblock = False
 
+# Expresión regular para detectar "negrit```" o "```negrit"
+pattern = re.compile(r'(negrit```|```negrit)')
+
 # Iteración sobre párrafos
 for paragraph in doc.Paragraphs:
     text = paragraph.Range.Text
 
-    # Verificar si hemos encontrado el inicio de un bloque de código
-    if '```' in text:
-        in_codeblock = not in_codeblock
-        found_codeblock = True
-        
-        # Eliminar el párrafo que contiene "```"
-        paragraph.Range.Delete()
-        continue  # Saltar el delimitador
+    # Asegurarse de que el texto es una cadena
+    if not isinstance(text, str):
+        continue  # Si no es una cadena, pasa al siguiente párrafo
+
+    # Verificar si hemos encontrado el inicio de un bloque de código con exactamente tres acentos invertidos
+    if text.count('```') == 1 and text.count('`') == 3:
+        # Verificar si el texto contiene "negrit```" o "```negrit"
+        if re.search(pattern, text):
+            # Reemplazar ``` con ````
+            updated_text = text.replace('```', '````')
+            paragraph.Range.Text = updated_text
+        else:
+            in_codeblock = not in_codeblock
+            found_codeblock = True
+            
+            # Eliminar el párrafo que contiene "```"
+            paragraph.Range.Delete()
+            continue  # Saltar el delimitador
 
     # Si estamos dentro de un bloque de código, cambiar la fuente y el color del texto y del fondo
     if in_codeblock:
+        # Cambiar la fuente, tamaño y formato
         paragraph.Range.Font.Name = "Consolas"
-        paragraph.Range.Font.Color = win32api.RGB(255, 255, 255)  # Blanco
-        paragraph.Range.Shading.BackgroundPatternColor = win32api.RGB(0, 0, 0)  # Negro
+        paragraph.Range.Font.Size = 11
+        paragraph.Range.Font.Bold = False  # Sin negrita
+        paragraph.Range.Font.Color = RGB(255, 255, 255)  # Blanco
+        paragraph.Range.Shading.BackgroundPatternColor = RGB(0, 0, 0)  # Negro
+        
+        # Eliminar las almohadillas dentro de bloques de código
+        if '#' in text:  # Comprobar si hay almohadillas
+            updated_text = text.replace('#', '')  # Elimina las almohadillas
+            paragraph.Range.Text = updated_text
 
-    # Si estamos dentro o fuera del bloque, eliminar los caracteres ``` antes y después.
-    if '´´´' in text and not in_codeblock:  
-        updated_text = text.replace('´´´', '')
+    # Si estamos dentro o fuera del bloque, eliminar los caracteres ``` antes y después, ignorando si hay "negrit"
+    if text.count('```') == 1 and not in_codeblock:
+        # Si se detecta la palabra "negrit", no cambiar el texto
+        if re.search(pattern, text):
+            continue
+        updated_text = text.replace('```', '')
         paragraph.Range.Text = updated_text
 
-
-# Compilamos las expresiones regulares
-markdown_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-url_pattern = re.compile(r'-\s(http[s]?://\S+)')
-markdown_link_regex = re.compile(r'-\s\[(.+?)\]\((http[s]?://\S+)\)')
-markdown_pattern2 = re.compile(r'\\[([^\\]]+)\\]\(url: \\'([^\\']+)\\'\\)')
-
-for i in range(1, doc.Paragraphs.Count + 1):
-    paragraph = doc.Paragraphs.Item(i)
-    match = markdown_pattern.search(paragraph.Range.Text)
-    if match:
-        # Comprobar si el siguiente párrafo es un título
-        next_paragraph = doc.Paragraphs.Item(i + 1) if i + 1 <= doc.Paragraphs.Count else None
-        if next_paragraph and next_paragraph.Style.NameLocal.startswith("Heading"):
-            pass  # Puedes reemplazar 'pass' con tu propio código
-        else:
-            # Agrega un salto de párrafo después del enlace de Markdown
-            paragraph.Range.InsertAfter('\\r')
+# Imprimir un mensaje si no se encontró ningún bloque de código
+if not found_codeblock:
+    print("No se encontró ningún bloque de código en el documento.")
 
 
+
+print("bloque código especial negrit y etiquetas (code)")
+
+# Variables para detección de bloques de código
+found_codeblock = False
+in_codeblock = False
+in_code_tag = False
+
+# Expresión regular para detectar "negrit````" o "````negrit"
+pattern_codeblock2 = re.compile(r'(negrit````|````negrit)')
+# Expresión regular para detectar las etiquetas (code) y (/code)
+pattern_code_tag_start = re.compile(r'\(code\)')
+pattern_code_tag_end = re.compile(r'\(/code\)')
+
+# Iteración sobre párrafos
 for paragraph in doc.Paragraphs:
-    match = re.search(markdown_link_regex, paragraph.Range.Text)
-    if match:
-        name = match.group(1)
-        url = match.group(2)
-        hyperlink_range = paragraph.Range
-        doc.Hyperlinks.Add(hyperlink_range, url, TextToDisplay=name)
-      
-for paragraph in doc.Paragraphs:
-    match = markdown_pattern.search(paragraph.Range.Text)
-    if match:
-        name = match.group(1)
-        hyperlink_url = ""
+    text = paragraph.Range.Text.strip()  # Eliminar espacios y saltos de línea del principio y final
 
-        # Comprueba si el texto de anclaje del enlace de Markdown contiene una dirección web
-        if re.match(r'https?://.+', match.group(2)):
-            hyperlink_url = match.group(2)
+    # Verificar si hemos encontrado el inicio de un bloque de código con "````" y "negrit"
+    if text.count('````') == 1 and text.count('`') == 4:
+        if re.search(pattern_codeblock2, text):
+            in_codeblock = not in_codeblock
+            found_codeblock = True
 
-        # Si el texto de anclaje del enlace de Markdown contiene una dirección web, crea un hipervínculo de Word
-        if hyperlink_url:
+            # Aplicar formato de bloque de código especial
+            paragraph.Range.Font.Name = "Consolas"
+            paragraph.Range.Font.Bold = True
+            paragraph.Range.Font.Color = win32api.RGB(0, 0, 0)  # Texto en color negro
+            paragraph.Range.Shading.BackgroundPatternColor = win32api.RGB(192, 192, 192)  # Fondo gris
 
-            paragraph.Range.Delete()
+            # **Ajustar espaciado superior**
+            paragraph.SpaceBefore = 0  # Espaciado antes del párrafo
+            paragraph.SpaceAfter = 0   # Espaciado después del párrafo
+            paragraph.LineSpacingRule = 1  # Espaciado de líneas simple
 
-            hyperlink_range = paragraph.Range
-            doc.Hyperlinks.Add(hyperlink_range, hyperlink_url, TextToDisplay=name)
+            # Eliminar las etiquetas "negrit" y "````"
+            updated_text = re.sub(r'negrit````|````negrit', '', text)
+            paragraph.Range.Text = updated_text
 
-for paragraph in doc.Paragraphs:
-    match = url_pattern.search(paragraph.Range.Text)
-    if match:
-        url = match.group(1)
-        hyperlink_range = paragraph.Range
-        # Añadir un bucle de comprobación antes de llamar al método doc.Hyperlinks.Add
-        doc.Hyperlinks.Add(hyperlink_range, url)
+    # Detectar el inicio de un bloque con etiquetas (code)
+    if re.search(pattern_code_tag_start, text):
+        in_code_tag = True
+        found_codeblock = True
+
+        # Aplicar formato de bloque de código
+        paragraph.Range.Font.Name = "Consolas"
+        paragraph.Range.Font.Bold = True
+        paragraph.Range.Font.Color = win32api.RGB(0, 0, 0)  # Texto en color negro
+        paragraph.Range.Shading.BackgroundPatternColor = win32api.RGB(192, 192, 192)  # Fondo gris
+
+        # **Ajustar espaciado superior**
+        paragraph.SpaceBefore = 0  # Espaciado antes del párrafo
+        paragraph.SpaceAfter = 0   # Espaciado después del párrafo
+        paragraph.LineSpacingRule = 1  # Espaciado de líneas simple
+
+        # Eliminar la etiqueta (code)
+        updated_text = re.sub(r'\(code\)', '', text)
+        paragraph.Range.Text = updated_text
+
+    # Detectar el final de un bloque con etiquetas (/code)
+    if re.search(pattern_code_tag_end, text):
+        in_code_tag = False
+
+        # Eliminar la etiqueta (/code)
+        updated_text = re.sub(r'\(/code\)', '', text)
+        paragraph.Range.Text = updated_text
+
+    # Si estamos dentro de un bloque (negrit o (code)), aplicar el formato
+    if in_codeblock or in_code_tag:
+        paragraph.Range.Font.Name = "Consolas"
+        paragraph.Range.Font.Bold = True
+        paragraph.Range.Font.Color = win32api.RGB(0, 0, 0)  # Texto en color negro
+        paragraph.Range.Shading.BackgroundPatternColor = win32api.RGB(192, 192, 192)  # Fondo gris
+
+        # **Ajustar espaciado superior**
+        paragraph.SpaceBefore = 0  # Espaciado antes del párrafo
+        paragraph.SpaceAfter = 0   # Espaciado después del párrafo
+        paragraph.LineSpacingRule = 1  # Espaciado de líneas simple
+
+    # Si estamos fuera de los bloques, eliminar los "````" en el texto
+    if text.count('````') == 1 and not in_codeblock:
+        if not re.search(pattern_codeblock2, text):
+            updated_text = text.replace('````', '')
+            paragraph.Range.Text = updated_text
+
+# Imprimir un mensaje si no se encontró ningún bloque de código
+if not found_codeblock:
+    print("No se encontró ningún bloque de código especial con negrit o etiquetas (code).")
 
 
+
+print("hypervinculo this link after x in red")
+
+# Definir el patrón de búsqueda para enlaces en formato Markdown y formato especial con 'url:'
+markdown_pattern2 = re.compile(r'\[([^\]]+)\]\(url:\s*[\\'"]([^\\'"]+)[\\'"]\)')
+
+# Iterar sobre todos los párrafos en el documento
 for paragraph in doc.Paragraphs:
     match = markdown_pattern2.search(paragraph.Range.Text)
     if match:
         # Extraemos el texto del enlace y la URL
-        link_text = match.group(1)
-        url = match.group(2)
+        link_text = match.group(1)  # El texto que se muestra en el enlace
+        url = match.group(2)        # La URL del enlace
 
         # Creamos un nuevo objeto de rango que contiene el texto del enlace
         link_range = doc.Range(paragraph.Range.Start, paragraph.Range.End)
+        
+        # Reemplazar el texto en el rango con solo el texto del enlace (sin la URL ni la palabra 'url:')
         link_range.Text = re.sub(markdown_pattern2, link_text, link_range.Text)
 
         # Agregamos el hipervínculo de Word
         hyperlink = doc.Hyperlinks.Add(link_range, url, TextToDisplay=link_text)
 
-        # Cambiar el color del texto a rojo
+        # Cambiar el color del texto del hipervínculo a rojo (en formato BGR)
         red_color_bgr = 255 | (0 << 8) | (0 << 16)
         hyperlink.Range.Font.Color = red_color_bgr
         hyperlink.Range.Font.Underline = True
@@ -1886,7 +3177,7 @@ for paragraph in doc.Paragraphs:
         # Agregar una "x" al final del enlace
         hyperlink.Range.InsertAfter(' x')
       
-
+      
 # Definir el texto objetivo y el texto de reemplazo
 target_text_1 = "###"
 replacement_text_1 = ""
@@ -1905,9 +3196,11 @@ replacement_text_7 = ""
 target_text_8 = "#####"
 replacement_text_8 = ""
 
-
+# Crear el objeto Find
+find_object = doc.Content.Find
 # Utilizar el objeto Find para buscar en todo el documento
 find_object.ClearFormatting()
+
 
 # Buscar todos los párrafos que contienen "###" y guardar su texto
 found_paragraphs_1 = []
@@ -2061,52 +3354,264 @@ for found_text in found_paragraphs_5:
         if found_text.replace(target_text_5, replacement_text_5) == paragraph.Range.Text:
             paragraph.Range.Italic = True
 
+
+# Iterar sobre cada párrafo en el documento
 print("Applying correct good formatting style if you see double dash")
 for paragraph in doc.Paragraphs:
     if "---" in paragraph.Range.Text:
-        # Borrar el texto original
-        paragraph.Range.Text = "\\n"
+        # Elimina los guiones y deja el texto
+        paragraph.Range.Text = paragraph.Range.Text.replace("---", "").strip()
         
-        # Agregar una línea horizontal
+        # Aplicar un borde superior al párrafo
         border = paragraph.Range.Borders(win32.constants.wdBorderTop)
         border.LineStyle = win32.constants.wdLineStyleSingle
         border.LineWidth = win32.constants.wdLineWidth050pt
-
-        # Establecer el color de la línea a gris claro
         border.Color = win32api.RGB(234, 234, 234)
-
-
-def apply_shading_to_text(container, pattern):
-    # Iterar sobre todos los elementos en el contenedor (párrafos o celdas)
-    for element in container:
-        # Buscar el patrón en el texto del elemento
-        matches = re.findall(pattern, element.Range.Text)
         
-        # Si se encontraron coincidencias, procesar cada una
-        if matches:
-            for match in matches:
-                # Crear un rango para la coincidencia
-                start_pos = element.Range.Text.find('`' + match + '`')
-                end_pos = start_pos + len(match) + 2  # Se suma 2 para incluir los caracteres de acento grave
-                
-                # Crear un nuevo rango que solo incluye la palabra que coincide con el patrón
-                word_range = doc.Range(element.Range.Start + start_pos, element.Range.Start + end_pos)
-                
-                # Aplicar el sombreado gris al rango de la palabra
-                word_range.Shading.BackgroundPatternColor = win32.constants.wdColorGray15
-                
-                # Eliminar los caracteres de acento grave
-                word_range.Text = match
+        
 
-# Definir el patrón de búsqueda
-pattern = '`(.*?)`'
+print("Aplicar color amarillo al texto rodeado por dos acentos graves y eliminar los acentos graves")
+try:
+    find_object = doc.Content.Find
+    find_object.ClearFormatting()
+    print("Depuración: Formato limpiado.")
 
-print("Applying gray shading to words in paragraphs...")
-apply_shading_to_text(doc.Paragraphs, pattern)
+    # Buscar texto rodeado por dos acentos graves en el contenido principal
+    find_object.Text = "``*``"  # Usa comodín para encontrar texto entre dos acentos graves
+    find_object.MatchWildcards = True
 
-print("Applying gray shading to words in table cells...")
-for table in doc.Tables:
-    apply_shading_to_text(table.Range.Cells, pattern)
+    # Aplicar color amarillo al texto encontrado
+    while find_object.Execute():
+        found_range = find_object.Parent
+        found_range.Font.Shading.BackgroundPatternColor = 65535  # Color amarillo
+        found_range.Text = found_range.Text[2:-2]  # Eliminar los acentos graves
+
+    # Buscar y procesar texto en cada celda de cada tabla
+    for table in doc.Tables:
+        for row in table.Rows:
+            for cell in row.Cells:
+                find_object = cell.Range.Find
+                find_object.ClearFormatting()
+                find_object.Text = "``*``"  # Usa comodín para encontrar texto entre dos acentos graves
+                find_object.MatchWildcards = True
+                while find_object.Execute():
+                    found_range = find_object.Parent
+                    found_range.Font.Shading.BackgroundPatternColor = 65535  # Color amarillo
+                    found_range.Text = found_range.Text[2:-2]  # Eliminar los acentos graves
+
+    print("Depuración: Texto resaltado en color amarillo y acentos graves eliminados.")
+
+except Exception as e:
+    print(f"Error al aplicar el color amarillo o eliminar los acentos graves: {e}")
+
+
+
+print("Aplicar color sombreado gris al texto rodeado por un acento grave y eliminar el acento grave")
+# Aplicar color sombreado gris al texto rodeado por un acento grave y eliminar el acento grave
+try:
+    find_object = doc.Content.Find
+    find_object.ClearFormatting()
+    print("Depuración: Formato limpiado.")
+
+    # Buscar texto rodeado por un acento grave en el contenido principal
+    find_object.Text = "`*`"  # Usa comodín para encontrar texto entre un acento grave
+    find_object.MatchWildcards = True
+
+    # Aplicar color sombreado gris al texto encontrado
+    while find_object.Execute():
+        found_range = find_object.Parent
+        found_range.Font.Shading.BackgroundPatternColor = 12632256  # Color sombreado gris
+        found_range.Text = found_range.Text[1:-1]  # Eliminar el acento grave
+
+    # Buscar y procesar texto en cada celda de cada tabla
+    for table in doc.Tables:
+        for row in table.Rows:
+            for cell in row.Cells:
+                find_object = cell.Range.Find
+                find_object.ClearFormatting()
+                find_object.Text = "`*`"  # Usa comodín para encontrar texto entre un acento grave
+                find_object.MatchWildcards = True
+                while find_object.Execute():
+                    found_range = find_object.Parent
+                    found_range.Font.Shading.BackgroundPatternColor = 12632256  # Color sombreado gris
+                    found_range.Text = found_range.Text[1:-1]  # Eliminar el acento grave
+
+    print("Depuración: Texto resaltado en color gris y acentos graves eliminados.")
+
+except Exception as e:
+    print(f"Error al aplicar el color gris o eliminar los acentos graves: {e}")
+
+
+
+
+print("Aplicar Fit Text y Wrap Text a celdas con texto mayormente sombreado (gris o amarillo) y con más de un espacio")
+try:
+    # Procesar cada tabla en el documento
+    for table in doc.Tables:
+        for row in table.Rows:
+            for cell in row.Cells:
+                # Obtener el rango de texto en la celda
+                range_in_cell = cell.Range
+                # Filtrar caracteres relevantes (excluir fin de celda y espacios en blanco al final)
+                relevant_characters = [
+                    character for character in range_in_cell.Characters
+                    if character.Text.strip()  # Ignorar caracteres vacíos o de fin de celda
+                ]
+
+                # Verificar si la mayoría de los caracteres relevantes están sombreados en gris o amarillo
+                shaded_characters = sum(
+                    1 for character in relevant_characters
+                    if character.Font.Shading.BackgroundPatternColor in [12632256, 65535]  # Gris o amarillo
+                )
+                total_relevant_characters = len(relevant_characters)
+                shading_ratio = shaded_characters / total_relevant_characters if total_relevant_characters > 0 else 0
+
+                # Considerar 'mayormente sombreado' si más del 90% de los caracteres están sombreados
+                is_majority_shaded = shading_ratio > 0.9
+
+                # Contar la cantidad de espacios en el texto
+                space_count = range_in_cell.Text.count(' ')
+
+                # Verificar si el texto cumple las condiciones
+                if is_majority_shaded and space_count > 1:
+                    cell.FitText = True
+                    cell.WordWrap = True
+    print("Proceso completado: Propiedades aplicadas a celdas tanto fit como wrap.")
+except Exception as e:
+    print(f"Error al aplicar propiedades a las celdas: {e}")
+
+
+
+print("aplicar sombreado gris dentro de listas y viñetas")
+def apply_gray_shading_to_lists(doc):
+    try:
+        find_object = doc.Content.Find
+        find_object.ClearFormatting()
+        print("Depuración: Formato limpiado.")
+
+        # Buscar texto rodeado por un acento grave en el contenido principal
+        find_object.Text = "`*`"  # Usa comodín para encontrar texto entre un acento grave
+        find_object.MatchWildcards = True
+
+        # Aplicar color sombreado gris al texto encontrado
+        while find_object.Execute():
+            found_range = find_object.Parent
+            found_range.Font.Shading.BackgroundPatternColor = 12632256  # Color sombreado gris
+            found_range.Text = found_range.Text[1:-1]  # Eliminar el acento grave
+
+        # Buscar y procesar texto en cada párrafo de las listas
+        for paragraph in doc.Paragraphs:
+            find_object = paragraph.Range.Find
+            find_object.ClearFormatting()
+            find_object.Text = "`*`"
+            find_object.MatchWildcards = True
+            while find_object.Execute():
+                found_range = find_object.Parent
+                found_range.Font.Shading.BackgroundPatternColor = 12632256
+                found_range.Text = found_range.Text[1:-1]
+
+        print("Depuración: Texto resaltado en color gris y acentos graves eliminados.")
+
+    except Exception as e:
+        print(f"Error al aplicar el color gris o eliminar los acentos graves: {e}")
+        
+apply_gray_shading_to_lists(doc)
+        
+        
+
+print("html tag automático y rápido")
+
+# Diccionario de colores con valores RGB
+colores = {
+    'azul': win32api.RGB(0, 0, 255),
+    'blue': win32api.RGB(0, 0, 255),
+    'yellow': win32api.RGB(255, 255, 0),
+    'amarillo': win32api.RGB(255, 255, 0),
+    'verde': win32api.RGB(0, 128, 0),
+    'green': win32api.RGB(0, 128, 0),
+    'marrón': win32api.RGB(165, 42, 42),
+    'brown': win32api.RGB(165, 42, 42),
+    'rosa': win32api.RGB(255, 105, 180),
+    'pink': win32api.RGB(255, 105, 180),
+    'rojo': win32api.RGB(255, 0, 0),
+    'red': win32api.RGB(255, 0, 0),
+    'crimson': win32api.RGB(220, 20, 60),
+    'teal': win32api.RGB(0, 128, 128),
+    'purple': win32api.RGB(128, 0, 128),
+    'violeta': win32api.RGB(128, 0, 128),
+    'colour': win32api.RGB(0, 0, 0),
+    'black': win32api.RGB(0, 0, 0)
+}
+
+def aplicar_formatos(paragraph):
+    # Expresión regular para etiquetas (span style=color:color) con (b)...(/b)
+    pattern_color_bold = re.compile(r'\(b\)\(span\s+style\s*=\s*["\\']?color\s*:\s*([a-z]+)\s*["\\']?\)([^()]*?)\(/b\)\(/span\)', re.IGNORECASE | re.DOTALL)
+    # Expresión regular para etiquetas (span style=color:color) sin (b)...(/b)
+    pattern_color = re.compile(r'\(span\s+style\s*=\s*["\\']?color\s*:\s*([a-z]+)\s*["\\']?\)([^()]*?)\(/span\)', re.IGNORECASE | re.DOTALL)
+
+    paragraph_text = paragraph.Range.Text
+
+    # Procesar coincidencias de etiquetas con (b)...(/b)
+    for match in pattern_color_bold.finditer(paragraph_text):
+        color = match.group(1).strip().lower() if match.group(1) else 'black'
+        content = match.group(2) if match.group(2) else ''
+
+        if color in colores:
+            try:
+                # Calcular posiciones en el documento para la parte a colorear y poner en negrita
+                start = paragraph.Range.Start + match.start(2)
+                end = start + len(content)
+                content_range = doc.Range(start, end)
+                content_range.Font.Color = colores[color]  # Aplicar el color
+                content_range.Font.Bold = True  # Aplicar negrita
+
+            except Exception as e:
+                print(f"No se pudo cambiar el color y negrita: {e}")
+        else:
+            print(f"Color desconocido: {color}")
+
+    # Procesar coincidencias de etiquetas sin (b)...(/b)
+    for match in pattern_color.finditer(paragraph_text):
+        color = match.group(1).strip().lower() if match.group(1) else 'black'
+        content = match.group(2) if match.group(2) else ''
+
+        if color in colores:
+            try:
+                # Calcular posiciones en el documento para la parte a colorear
+                start = paragraph.Range.Start + match.start(2)
+                end = start + len(content)
+                content_range = doc.Range(start, end)
+                content_range.Font.Color = colores[color]  # Aplicar el color
+
+            except Exception as e:
+                print(f"No se pudo cambiar el color: {e}")
+        else:
+            print(f"Color desconocido: {color}")
+
+    # Eliminar todas las etiquetas de apertura y cierre al final
+    eliminar_etiquetas(paragraph.Range)
+
+def eliminar_etiquetas(rango):
+    # Eliminar etiquetas de cierre
+    rango.Find.ClearFormatting()
+    rango.Find.Replacement.ClearFormatting()
+    rango.Find.Execute(FindText=r"\(/span\)", ReplaceWith="", Replace=win32com.client.constants.wdReplaceAll, Forward=True, MatchWildcards=True)
+    rango.Find.Execute(FindText=r"\(/b\)", ReplaceWith="", Replace=win32com.client.constants.wdReplaceAll, Forward=True, MatchWildcards=True)
+
+    # Eliminar etiquetas de apertura
+    rango.Find.Execute(FindText=r"\(b\)", ReplaceWith="", Replace=win32com.client.constants.wdReplaceAll, Forward=True, MatchWildcards=True)
+    rango.Find.Execute(FindText=r"\(span[!)]@\)", ReplaceWith="", Replace=win32com.client.constants.wdReplaceAll, Forward=True, MatchWildcards=True)
+
+def process_document():
+    for paragraph in doc.Paragraphs:
+        # Limitar a párrafos que contienen etiquetas (span style="color")
+        if re.search(r'\(span\s+style\s*=\s*["\\']?color\s*:\s*[a-z]+\s*["\\']?\)', paragraph.Range.Text, re.IGNORECASE):
+            aplicar_formatos(paragraph)
+
+# Ejecuta el procesamiento del documento
+process_document()
+
+
 
 # Patrón regex para identificar URLs
 url_pattern = re.compile(r'\b((http|https):\/\/)?[^\s()<>]+(?:\.[a-z]{2,})')
@@ -2123,16 +3628,21 @@ for paragraph in doc.Paragraphs:
         start_pos = match.start()
         end_pos = match.end()
 
-         # Comprobar si la URL es parte de una imagen en Markdown
+        # Comprobar si la URL es parte de una imagen en Markdown
         if image_pattern.search(paragraph.Range.Text[start_pos:end_pos]):
             print(f"Ignoring the URL '{url}' because it is part of an image description in Markdown.")
             continue  # Si es así, ignora la URL y pasa a la siguiente
 
-        # Crear un rango que solo incluye la URL
+        # Crear un rango que solo incluye la URL y verificar si es válido
         url_range = doc.Range(paragraph.Range.Start + start_pos, paragraph.Range.Start + end_pos)
-
-        # Añadir un hipervínculo a la URL
-        doc.Hyperlinks.Add(Anchor=url_range, Address=url)  
+        
+        if url_range.Start < url_range.End:  # Verificar si el rango es válido antes de añadir el hipervínculo
+            try:
+                doc.Hyperlinks.Add(Anchor=url_range, Address=url)
+            except Exception as e:
+                print(f"Could not add hyperlink for URL '{url}': {e}")
+        else:
+            print(f"Invalid range for URL '{url}'. Skipping hyperlink addition.")
 
 # Itera sobre todos los campos en el documento
 for field in doc.Fields:
@@ -2143,8 +3653,7 @@ for field in doc.Fields:
             # Comprueba si el campo es parte de la tabla de contenido
             if field.Code.Text.startswith(" TOC "):
                 print("The hyperlink is part of the table of contents, the formatting is not changed.")
-                # Si es parte de la tabla de contenido, no cambies el formato
-                continue
+                continue  # Si es parte de la tabla de contenido, no cambies el formato
             # Cambia el color del texto a azul
             field.Result.Font.Color = win32com.client.constants.wdColorBlue
             # Cambia el color del subrayado a azul
@@ -2168,85 +3677,377 @@ for i in range(doc.Paragraphs.Count, 0, -1):
                prev_paragraph.Range.Delete()
 
 
-# Aplicar formatos en párrafos
-for i in range(len(doc.Paragraphs), 0, -1):
-    paragraph = doc.Paragraphs.Item(i)
-    text = paragraph.Range.Text
 
-    # Ignorar si no hay etiquetas HTML o si está en un campo especial
-    if not re.search(r'\(span style="color:(.*?)".*?\)(.*?)\(/span\)|\(b\)(.*?)\(/b\)', text, re.IGNORECASE) or paragraph.Range.Fields.Count > 0:
-        continue
 
-    # Aplicar formatos y actualizar el texto del párrafo
-    new_text = aplicar_formatos(paragraph.Range, text)
-    if i <= len(doc.Paragraphs):
-        doc.Paragraphs.Item(i).Range.Text = new_text
 
-# Aplicar formatos en tablas
-for table in doc.Tables:
-    for row in table.Rows:
-        for cell in row.Cells:
-            cell_text = cell.Range.Text
-            # Aplicar formatos y actualizar el texto de la celda
-            new_cell_text = aplicar_formatos(cell.Range, cell_text)
-            cell.Range.Text = new_cell_text
+print("Reajustes de texto e imágenes saltos de párrafos")
+
+# Constantes para identificar imágenes en Word
+wdInlineShapePicture = 3  # Tipo de imagen para imágenes en línea "Picture" en InlineShape
+POINTS_TO_CM = 0.0352778  # Conversión de puntos a centímetros
+
+def limpiar_enumeraciones_vacias_antes_de_titulos(doc):
+    print("Limpiando enumeraciones vacías antes de títulos...")
+
+    i = 1
+    while i <= doc.Paragraphs.Count:
+        parrafo = doc.Paragraphs.Item(i)
+        es_titulo = parrafo.OutlineLevel != win32.constants.wdOutlineLevelBodyText
+
+        if es_titulo:
+            j = i - 1
+            while j > 0:
+                parrafo_anterior = doc.Paragraphs.Item(j)
+                es_enumeracion_anterior = parrafo_anterior.Range.ListFormat.ListType != win32.constants.wdListNoNumbering
+                texto_anterior = parrafo_anterior.Range.Text.strip()
+
+                if es_enumeracion_anterior and not texto_anterior:
+                    parrafo_anterior.Range.Delete()
+                    print(f"Enumeración vacía eliminada en la posición {j}.")
+                    i -= 1
+                else:
+                    break
+                j -= 1
+        i += 1
+
+def obtener_estilos_de_titulo(doc):
+    print("Obteniendo títulos en el documento...")
+    estilos_de_titulo = []
+    for estilo in doc.Styles:
+        if estilo.NameLocal.startswith("Heading") or "Heading" in estilo.NameLocal:
+            estilos_de_titulo.append(estilo.NameLocal)
+    i = 1
+    while i <= doc.Paragraphs.Count:
+        paragraph = doc.Paragraphs.Item(i)
+        paragraph_text = paragraph.Range.Text.strip()
+        style_name = paragraph.Style.NameLocal
+        if style_name in estilos_de_titulo and paragraph_text:
+            if i > 1:
+                prev_paragraph = doc.Paragraphs.Item(i - 1)
+                prev_text = prev_paragraph.Range.Text.strip()
+                if prev_text != '':
+                    paragraph.Range.InsertParagraphBefore()
+                    new_paragraph = doc.Paragraphs.Item(i)
+                    new_paragraph.Style = doc.Styles("Normal")
+                    i += 1
+            else:
+                paragraph.Range.InsertParagraphBefore()
+                new_paragraph = doc.Paragraphs.Item(1)
+                new_paragraph.Style = doc.Styles("Normal")
+                i += 1
+            if i < doc.Paragraphs.Count:
+                next_paragraph = doc.Paragraphs.Item(i + 1)
+                next_text = next_paragraph.Range.Text.strip()
+                if next_text != '':
+                    paragraph.Range.InsertParagraphAfter()
+                    new_paragraph = doc.Paragraphs.Item(i + 1)
+                    new_paragraph.Style = doc.Styles("Normal")
+                    i += 1
+            else:
+                paragraph.Range.InsertParagraphAfter()
+                new_paragraph = doc.Paragraphs.Item(doc.Paragraphs.Count)
+            i += 1
+        else:
+            i += 1
+
+def mostrar_medidas_imagenes(doc):
+    index = 1
+    while index <= doc.InlineShapes.Count:
+        inline_shape = doc.InlineShapes.Item(index)
+        if inline_shape.Type == wdInlineShapePicture:
+            width_cm = inline_shape.Width * POINTS_TO_CM
+            height_cm = inline_shape.Height * POINTS_TO_CM
+
+            paragraph = inline_shape.Range.Paragraphs(1)
+
+            # Verificar si el párrafo está dentro de una tabla
+            if paragraph.Range.Tables.Count > 0:
+                # La imagen está dentro de una tabla
+                # No podemos insertar párrafos antes o después dentro de una tabla
+                print(f"La imagen en la posición {index} está dentro de una tabla. Se omite la inserción de párrafos.")
+            else:
+                # Obtener el índice del párrafo
+                for i in range(1, doc.Paragraphs.Count + 1):
+                    p = doc.Paragraphs.Item(i)
+                    if p.Range.Start == paragraph.Range.Start:
+                        paragraph_index = i
+                        break
+
+                if "|" in inline_shape.AlternativeText or "|" in inline_shape.Title:
+                    paragraph.Range.InsertParagraphBefore()
+                    paragraph.Range.InsertParagraphBefore()
+                    paragraph_index += 2
+                    paragraph = doc.Paragraphs.Item(paragraph_index)
+
+                    new_paragraph_before = doc.Paragraphs.Item(paragraph_index - 1)
+                    new_paragraph_before.Style = doc.Styles("Normal")
+                    new_paragraph_before_2 = doc.Paragraphs.Item(paragraph_index - 2)
+                    new_paragraph_before_2.Style = doc.Styles("Normal")
+
+                    paragraph.Range.InsertParagraphAfter()
+                    paragraph.Range.InsertParagraphAfter()
+
+                    new_paragraph_after = doc.Paragraphs.Item(paragraph_index + 1)
+                    new_paragraph_after.Style = doc.Styles("Normal")
+                    new_paragraph_after_2 = doc.Paragraphs.Item(paragraph_index + 2)
+                    new_paragraph_after_2.Style = doc.Styles("Normal")
+
+                    print(f"Imagen con tubería detectada en la posición {index}. Se añadieron 2 saltos de párrafo antes y después.")
+                else:
+                    if paragraph_index > 1:
+                        prev_paragraph = doc.Paragraphs.Item(paragraph_index - 1)
+                        prev_text = prev_paragraph.Range.Text.strip()
+                        if prev_text != '':
+                            paragraph.Range.InsertParagraphBefore()
+                            new_paragraph = doc.Paragraphs.Item(paragraph_index)
+                            new_paragraph.Style = doc.Styles("Normal")
+                            paragraph_index += 1
+                            paragraph = doc.Paragraphs.Item(paragraph_index)
+                    else:
+                        paragraph.Range.InsertParagraphBefore()
+                        new_paragraph = doc.Paragraphs.Item(1)
+                        new_paragraph.Style = doc.Styles("Normal")
+                        paragraph_index += 1
+                        paragraph = doc.Paragraphs.Item(paragraph_index)
+
+                    if paragraph_index < doc.Paragraphs.Count:
+                        next_paragraph = doc.Paragraphs.Item(paragraph_index + 1)
+                        next_text = next_paragraph.Range.Text.strip()
+                        if next_text != '':
+                            paragraph.Range.InsertParagraphAfter()
+                            new_paragraph = doc.Paragraphs.Item(paragraph_index + 1)
+                            new_paragraph.Style = doc.Styles("Normal")
+                    else:
+                        paragraph.Range.InsertParagraphAfter()
+                        new_paragraph = doc.Paragraphs.Item(doc.Paragraphs.Count)
+                        new_paragraph.Style = doc.Styles("Normal")
+        index += 1
+
+# Llamadas a las funciones para procesar el documento
+limpiar_enumeraciones_vacias_antes_de_titulos(doc)
+obtener_estilos_de_titulo(doc)
+mostrar_medidas_imagenes(doc)
+
 
 
 print("Paragraph Cleaning...")
 
-# Comprobar si el documento tiene al menos 6 páginas
-if doc.ComputeStatistics(win32.constants.wdStatisticPages) >= 6:
-    # Obtener el rango de la sexta página
-    sixth_page_range = word_app.Selection.GoTo(What=win32.constants.wdGoToPage, Which=win32.constants.wdGoToAbsolute, Count=6)
-else:
-    print("The document is less than 6 pages.")
-    sixth_page_range = None
+# Limpieza de párrafos...
+try:
+    # Constantes para ComputeStatistics y GoTo
+    wdStatisticPages = 2  # Valor para ComputeStatistics para páginas
+    wdGoToPage = 1
+    wdGoToAbsolute = 1
 
-# Recorrer todos los párrafos del documento en orden inverso
-for i in range(doc.Paragraphs.Count, 0, -1):
-    paragraph = doc.Paragraphs.Item(i)
-    
-    # Comprobar si el párrafo está en las primeras 5 páginas
-    if sixth_page_range and paragraph.Range.Start < sixth_page_range.Start:
-        continue  # Si está en las primeras 5 páginas, ignorarlo
-    
-    # Comprobar si el párrafo es un salto de párrafo
-    if paragraph.Range.Text.strip() == "":
-        # Si el párrafo anterior también es un salto de párrafo, eliminarlo
-        if i > 1:  # Asegurarse de que no es el primer párrafo
-            prev_paragraph = doc.Paragraphs.Item(i - 1)
-            if prev_paragraph.Range.Text.strip() == "":
+    # Comprobar si el documento tiene 6 páginas o más
+    if doc.ComputeStatistics(wdStatisticPages) >= 6:
+        sixth_page_range = word_app.Selection.GoTo(What=wdGoToPage, Which=wdGoToAbsolute, Count=6)
+    else:
+        sixth_page_range = None
+
+    for i in range(doc.Paragraphs.Count, 0, -1):
+        paragraph = doc.Paragraphs.Item(i)
+        range_font = paragraph.Range.Font
+
+        # Saltar párrafos antes de la sexta página, si existe
+        if sixth_page_range and paragraph.Range.Start < sixth_page_range.Start:
+            continue
+
+        # Verificar si el párrafo es un título con la fuente "Graphik" (negrita, tamaño 16)
+        if (
+            range_font.Bold in [True, -1]  # Aceptar True o -1 como "negrita"
+            and "Graphik" in range_font.Name  # Busca cualquier fuente que contenga "Graphik"
+            and range_font.Size == 16
+        ):
+            # Verificar si el siguiente párrafo es una lista de viñetas
+            next_paragraph = None
+            if i < doc.Paragraphs.Count:
+                next_paragraph = doc.Paragraphs.Item(i + 1)
+
+            if next_paragraph and next_paragraph.Range.ListFormat.ListType in [1, 2]:  # Viñetas o numeración
+                # Contar saltos de párrafo entre el título y la lista
+                paragraph_gap_count = next_paragraph.Range.Start - paragraph.Range.End
+
+                if paragraph_gap_count > 1:
+                    # Si hay más de un salto de párrafo, reducir a uno
+                    try:
+                        doc.Range(paragraph.Range.End, next_paragraph.Range.Start).Delete()
+                        paragraph.Range.InsertParagraphAfter()
+                        print(f"Saltos de párrafo ajustados entre título en posición {i} y lista.")
+                    except Exception as e:
+                        print(f"Error ajustando saltos: {e}")
+
+                elif paragraph_gap_count == 0:
+                    # Si no hay salto de párrafo, insertar uno
+                    try:
+                        paragraph.Range.InsertParagraphAfter()
+                        print(f"Salto de párrafo añadido entre título en posición {i} y lista.")
+                    except Exception as e:
+                        print(f"Error añadiendo salto: {e}")
+
+        # Verificar si hay exactamente 4 saltos de párrafo consecutivos
+        empty_paragraph_count = 0
+        consecutive_paragraphs = []
+
+        for j in range(i, doc.Paragraphs.Count + 1):
+            consecutive_paragraph = doc.Paragraphs.Item(j)
+            if consecutive_paragraph.Range.Text.strip() == "":
+                empty_paragraph_count += 1
+                consecutive_paragraphs.append(consecutive_paragraph)
+
+                if empty_paragraph_count > 4:
+                    break
+            else:
+                break
+
+        if empty_paragraph_count == 4:
+            try:
+                # Eliminar dos párrafos para dejar solo dos
+                doc.Range(consecutive_paragraphs[0].Range.Start, consecutive_paragraphs[1].Range.End).Delete()
+                print(f"Saltos consecutivos reducidos de 4 a 2 en la posición {i}.")
+            except Exception as e:
+                print(f"Error eliminando saltos: {e}")
+
+        # Verificar si hay exactamente 3 saltos de párrafo consecutivos
+        empty_paragraph_count = 0
+        consecutive_paragraphs = []
+
+        for j in range(i, doc.Paragraphs.Count + 1):
+            consecutive_paragraph = doc.Paragraphs.Item(j)
+            if consecutive_paragraph.Range.Text.strip() == "":
+                empty_paragraph_count += 1
+                consecutive_paragraphs.append(consecutive_paragraph)
+
+                if empty_paragraph_count > 3:
+                    break
+            else:
+                break
+
+        if empty_paragraph_count == 3:
+            try:
+                # Eliminar un párrafo para dejar solo dos
+                doc.Range(consecutive_paragraphs[0].Range.Start, consecutive_paragraphs[0].Range.End).Delete()
+                print(f"Saltos consecutivos reducidos de 3 a 2 en la posición {i}.")
+            except Exception as e:
+                print(f"Error eliminando salto: {e}")
+
+except Exception as e:
+    print(f"Error general: {e}")
+
+
+
+
+print("Eliminando puntos negros vacios")
+
+def eliminar_puntos_negros(doc):
+    ## Itera sobre todos los párrafos del documento
+    for para in doc.Paragraphs:
+        # Obtén el texto del párrafo y elimina espacios adicionales
+        texto_parrafo = para.Range.Text.strip()
+        
+        # Verifica si el párrafo es parte de una lista (viñetas o numeración)
+        if para.Range.ListFormat.ListType != 0:  # No es "wdListNoNumbering"
+            # Si el párrafo no tiene texto adicional aparte de la viñeta, lo elimina
+            if not texto_parrafo or texto_parrafo == '•':
                 try:
-                    prev_paragraph.Range.Delete()
-                except Exception as e:
-                    print(f"Could not delete paragraph: {e}")
+                    para.Range.Delete()  # Elimina el párrafo
+                except Exception:
+                    pass  # Ignora cualquier error al eliminar el párrafo
+
+# Llama a la función (asegúrate de que 'doc' esté definido correctamente)
+eliminar_puntos_negros(doc)
+
+
+
+from datetime import datetime
+
+print("Poniendo fecha actual al pie de página y la página del documento...")
+
+def configurar_footer(doc):
+    # Obtén el año actual
+    year_actual = datetime.now().year
+
+    try:
+        # Asegúrate de que la Sección 2 existe
+        if len(doc.Sections) >= 2:
+            section = doc.Sections(2)  # Accede a la Sección 2
+
+            # Habilitar pie de página diferente para la primera página
+            section.PageSetup.DifferentFirstPageHeaderFooter = True
+
+            # Desvincular el pie de página de la primera página de la sección anterior
+            section.Footers(2).LinkToPrevious = False  # 2 = wdHeaderFooterFirstPage
+
+            # Configura el pie de página para la primera página (First Page Footer)
+            first_page_footer = section.Footers(2)  # 2 = wdHeaderFooterFirstPage
+            first_page_footer.Range.Text = ""  # Limpia cualquier contenido previo en el pie de página
+
+            # Configurar el Copyright centrado
+            rango_copyright = first_page_footer.Range
+            rango_copyright.ParagraphFormat.Alignment = 1  # Centrado
+            rango_copyright.Text = f"Copyright © {year_actual} Accenture. All rights reserved."
+            rango_copyright.Font.Bold = False
+            rango_copyright.Font.Name = "Arial"
+            rango_copyright.Font.Size = 10
+
+            # Configurar el número de página alineado a la derecha
+            rango_numero_pagina = first_page_footer.Range.Duplicate
+            rango_numero_pagina.Collapse(0)  # Colapsa al final del contenido actual
+            rango_numero_pagina.Fields.Add(rango_numero_pagina, 33)  # 33 = wdFieldPage
+            rango_numero_pagina.InsertBefore("\t\t\t\t\t\t")  # Inserta 5 tabulaciones
+            rango_numero_pagina.ParagraphFormat.Alignment = 2  # Derecha
+
+            # Configurar el inicio de la numeración desde esta sección
+            section.Headers(1).PageNumbers.RestartNumberingAtSection = True
+            section.Headers(1).PageNumbers.StartingNumber = 1
+
+        else:
+            print("La Sección 2 no existe en el documento.")
+
+        # Actualiza todos los campos dinámicos del documento
+        doc.Fields.Update()
+        print("Campos del documento actualizados correctamente.")
+
+    except Exception as e:
+        print(f"Error al configurar el pie de página: {e}")
+
+# Llama a la función (asegúrate de que 'doc' esté definido correctamente)
+configurar_footer(doc)
+
 
 try:
-    # Acceder a la tabla de contenido
-    table_of_contents = doc.TablesOfContents(1)
+    # Verificar si existe al menos una tabla de contenido
+    if doc.TablesOfContents.Count > 0:
+        # Acceder a la tabla de contenido
+        table_of_contents = doc.TablesOfContents(1)
+        try:
+            # Intentar actualizar la tabla de contenido
+            table_of_contents.Update()
+            print("Tabla de contenido actualizada correctamente.")
+        except Exception as e:
+            print(f"Se produjo un error al intentar actualizar la tabla de contenido: {e}")
+    else:
+        print("No se encontró ninguna tabla de contenido en el documento.")
 except Exception as e:
     print(f"Se produjo un error al intentar acceder a la tabla de contenido: {e}")
 
-try:
-    # Actualizar la tabla de contenido
-    table_of_contents.Update()
-except Exception as e:
-    print(f"Se produjo un error al intentar actualizar la tabla de contenido: {e}")
+
 
 try:
-    # Guardar y cerrar el documento
+    process_document()
     doc.Save()
-    doc.Close()
+    print("Document processed and saved successfully.")
 except Exception as e:
-    print(f"Se produjo un error al intentar guardar y cerrar el documento: {e}")
+    print(f"An error occurred while processing the document: {e}")
 
 try:
+    doc.Close()
     word_app.Quit()
+    print("Word application closed.")
 except Exception as e:
-    print(f"Se produjo un error al intentar cerrar la aplicación de Word: {e}")
+    print(f"An error occurred while closing Word: {e}")
 
-
-print("¡finished!")
+print("Finished!")
 
     """)
 
