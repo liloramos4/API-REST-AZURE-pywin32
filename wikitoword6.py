@@ -48,7 +48,8 @@ from win32com.client import constants, gencache
 from win32com.client import constants as wdConst
 from win32com.client.gencache import EnsureDispatch
 from urllib.parse import unquote
-
+from bs4 import BeautifulSoup
+from PIL import Image
 
 
 # Pregunta al usuario si quiere descargar todas las páginas y subpáginas de la Wiki
@@ -373,6 +374,23 @@ if respuesta.lower() == 'si':
             content = re.sub(r'(```[\s\S]*?```|\(code\)[\s\S]*?\(/code\))', lambda m: re.sub(r'(^[ \t]*-[ \t]*script:[ \t]*\|)[ \t]*(#.*$)', lambda a: f"{a.group(1)}\\n{' ' * a.group(1).find('r')}{a.group(2).strip()}", m.group(0), flags=re.MULTILINE), content, flags=re.DOTALL)
 
 
+            # Solamente calcula y  convierte de un signo > a parentesis blockquote. Convierte todos los blockquote borde izquierdo en parentesis para que se pueda procesar bien
+            lines = content.strip('\\n').splitlines()
+            result = []
+            prev_blockquote = False
+
+            for line in lines:
+                if re.match(r'^\s*>+\s*(.*)', line):
+                    result.append(re.sub(r'^\s*>+\s*(.*)', r') \\1', line))
+                    prev_blockquote = True
+                elif re.match(r'^\s*\|\s*.*', line) and prev_blockquote:
+                    result.append(re.sub(r'^\s*\|\s*(.*)', r') \\1', line))
+                    prev_blockquote = False  # solo permitir uno seguido
+                else:
+                    result.append(line)
+                    prev_blockquote = False  # se corta la cadena
+
+            content = '\\n'.join(result) 
                                      
             info = {
                 'name': page['path'],
@@ -1020,7 +1038,6 @@ else:
             # 1) Aplana pipes dentro de (code)…(/code) sin tocar los comentarios
             content = re.sub(r'(```[\s\S]*?```|\(code\)[\s\S]*?\(/code\))', lambda m: m.group(0).replace("\\n|", " |").replace("| \\n", " | "), content, flags=re.DOTALL)
 
-
             content = re.sub(
                 r'(```[\s\S]*?```|\(code\)[\s\S]*?\(/code\))', 
                 lambda m: re.sub(
@@ -1034,6 +1051,23 @@ else:
 
             content = re.sub(r'(```[\s\S]*?```|\(code\)[\s\S]*?\(/code\))', lambda m: re.sub(r'(^[ \t]*-[ \t]*script:[ \t]*\|)[ \t]*(#.*$)', lambda a: f"{a.group(1)}\\n{' ' * a.group(1).find('r')}{a.group(2).strip()}", m.group(0), flags=re.MULTILINE), content, flags=re.DOTALL)
 
+            # Solamente calcula y  convierte de un signo > a parentesis blockquote. Convierte todos los blockquote borde izquierdo en parentesis para que se pueda procesar bien
+            lines = content.strip('\\n').splitlines()
+            result = []
+            prev_blockquote = False
+
+            for line in lines:
+                if re.match(r'^\s*>+\s*(.*)', line):
+                    result.append(re.sub(r'^\s*>+\s*(.*)', r') \\1', line))
+                    prev_blockquote = True
+                elif re.match(r'^\s*\|\s*.*', line) and prev_blockquote:
+                    result.append(re.sub(r'^\s*\|\s*(.*)', r') \\1', line))
+                    prev_blockquote = False  # solo permitir uno seguido
+                else:
+                    result.append(line)
+                    prev_blockquote = False  # se corta la cadena
+
+            content = '\\n'.join(result)          
 
             info = {
                 'name': page['path'],
@@ -1591,9 +1625,7 @@ for para in doc.Paragraphs:
             pass
 
 
-            
-
-
+           
 print("Bullet and sub ul li HTML robot tags only matched")
 
 opt = doc.Application.Options
@@ -1690,11 +1722,6 @@ for par in doc.Paragraphs:
 
 
 
-
-
-
-
-
 print("table creation type 2 the newest")
 # Lista para almacenar todas las tablas encontradas
 all_tables_data = []
@@ -1758,6 +1785,10 @@ while True:
                 if re.match(r'^\|\s*\+-', line) or re.match(r'^\|\s*-+\+', line):
                     continue
 
+                #  Ignorar filas tipo |(img …)|
+                if re.fullmatch(r'^\|\(img\s+[^)]*\)\|$', line, re.IGNORECASE):
+                    continue
+    
                 # Manejar inicio y fin de tabla
                 if "|" in line and line.lstrip().startswith("|") and len(line.split("|")) > 2:
                     if start_table is None:
@@ -1975,6 +2006,11 @@ while True:
         if re.match(r'^\|\s*\+-', line) or re.match(r'^\|\s*-+\+', line):
             continue
         
+        #  Ignorar filas tipo |(img …)|
+        if re.fullmatch(r'^\|\(img\s+[^)]*\)\|$', line, re.IGNORECASE):
+            continue
+                    
+                    
         if "|" in line and line.lstrip().startswith("|") and len(line.split("|")) > 2:
             if start_table is None:
                 start_table = index
@@ -2069,8 +2105,6 @@ while True:
                     
     # Estilo de tabla
     table.Style = "Acc_Table_1"
-
-
 
 
 # Ajusta el tamaño de las celdas a 2.19 cm (convertido a puntos) cuando tiene más de 5 columnas la tabla
@@ -2564,29 +2598,161 @@ for para in doc.Paragraphs:
 
 
 
-print("Applying > signs format in the word document")
-# Patrón para detectar líneas con uno o más '>'
-blockquote_pattern = '^>+.*'
+print("Applying blockquote format in the word document")
+
+# Permite uno o más paréntesis de cierre seguidos de espacio
+blockquote_pattern = r'^[\)>]+\s*'
 
 for para in doc.Paragraphs:
-    # Verificar si el párrafo contiene el patrón de blockquote
-    match = re.match(blockquote_pattern, para.Range.Text)
+    full_text = para.Range.Text
+    # Comprobamos si arranca con uno o más ")" y un espacio
+    match = re.match(blockquote_pattern, full_text)
     if match:
-        # Aplicar estilo 'Normal' antes de modificar el formato
+        # Elimina los paréntesis y el espacio inicial
+        delete_range = para.Range.Duplicate
+        delete_range.End = delete_range.Start + match.end()
+        delete_range.Delete()
+
+        # Aseguramos el estilo "Normal" antes de aplicar bordes
         para.Range.Style = word_app.ActiveDocument.Styles("Normal")
 
-        # Eliminar los caracteres '>'
-        text_before_formatting = para.Range.Text
-        para.Range.Text = text_before_formatting.replace('>', '', match.end() - match.start())
+        # Aplicamos el borde izquierdo
+        border = para.Range.ParagraphFormat.Borders(constants.wdBorderLeft)
+        border.LineStyle = constants.wdLineStyleSingle
+        border.LineWidth = constants.wdLineWidth225pt  # borde grueso
+        border.Color = win32api.RGB(234, 234, 234)
+        
+        # Aplicamos la tabulación para diferenciar el texto
+        indent_level = 20 * match.end()  # 20 puntos por cada paréntesis
+        para.Range.ParagraphFormat.LeftIndent = indent_level  # Aplica sangría
 
-        # Aplicar el formato específico al párrafo
-        para.Range.ParagraphFormat.Borders(constants.wdBorderLeft).LineStyle = constants.wdLineStyleSingle
-        para.Range.ParagraphFormat.Borders(constants.wdBorderLeft).LineWidth = constants.wdLineWidth050pt  # Aumento del ancho
-        para.Range.ParagraphFormat.Borders(constants.wdBorderLeft).Color = win32api.RGB(234, 234, 234)
 
-        # Imprimir el texto del párrafo al que se le ha aplicado el formato
-        print(f"Formato aplicado al párrafo: {text_before_formatting.strip()}")
+        # Log
+        print(f"Formato aplicado al párrafo: {full_text.strip()}")
 
+
+
+print("gestiona etiquetas html sup")
+# Patrón para pares completos: captura lo que hay entre (sup) y (/sup)
+pair_re = re.compile(r'\(sup\)(.*?)\(/sup\)', re.DOTALL)
+# Patrón para aperturas sueltas
+open_re = re.compile(r'\(sup\)')
+
+for para in doc.Paragraphs:
+    rng = para.Range
+    text = rng.Text  # incluye el carácter de párrafo al final
+
+    # 1) Procesar todos los pares explícitos (sup)…(/sup)
+    for m in reversed(list(pair_re.finditer(text))):
+        full_start, full_end = m.span(0)
+        inner_text = m.group(1)
+
+        # Rango absoluto en el documento
+        sup_start = rng.Start + full_start + len("(sup)")
+        sup_end   = sup_start + len(inner_text)
+
+        # Aplica superíndice al contenido
+        doc.Range(sup_start, sup_end).Font.Superscript = True
+
+        # Borra primero la etiqueta de cierre
+        doc.Range(rng.Start + full_start + len("(sup)") + len(inner_text),
+                  rng.Start + full_end).Delete()
+        # Luego borra la etiqueta de apertura
+        doc.Range(rng.Start + full_start,
+                  rng.Start + full_start + len("(sup)")).Delete()
+
+        # Refresca texto del párrafo tras las eliminaciones
+        text = rng.Text
+
+    # 2) Procesar aperturas sueltas: (sup)…<fin de párrafo>
+    for m in reversed(list(open_re.finditer(text))):
+        start = m.start()
+        next_idx = start + len("(sup)")
+
+        # Si tras (sup) hay un espacio, solo borramos la etiqueta
+        if next_idx < len(text) and text[next_idx].isspace():
+            doc.Range(rng.Start + start,
+                      rng.Start + start + len("(sup)")).Delete()
+            text = rng.Text
+            continue
+
+        # Si no hay espacio, aplicamos superíndice hasta fin de párrafo
+        sup_start = rng.Start + start + len("(sup)")
+        sup_end   = rng.End - 1  # antes del salto de párrafo
+
+        doc.Range(sup_start, sup_end).Font.Superscript = True
+
+        # Borra la etiqueta de apertura
+        doc.Range(rng.Start + start,
+                  rng.Start + start + len("(sup)")).Delete()
+
+        # Refresca texto del párrafo tras las eliminaciones
+        text = rng.Text
+
+print("✅ Formateo de superíndices con (sup)…(/sup) y aperturas huérfanas completado.")
+
+
+
+print("gestiona etiquetas html sub")
+# Patrón para pares completos: captura lo que hay entre (sub) y (/sub)
+pair_re = re.compile(r'\(sub\)(.*?)\(/sub\)', re.DOTALL)
+# Patrón para aperturas sueltas
+open_re = re.compile(r'\(sub\)')
+
+for para in doc.Paragraphs:
+    rng = para.Range
+    text = rng.Text  # incluye el carácter de párrafo al final
+
+    # 1) Procesar todos los pares explícitos (sub)…(/sub)
+    for m in reversed(list(pair_re.finditer(text))):
+        full_start, full_end = m.span(0)
+        inner_text = m.group(1)
+
+        # Rango absoluto en el documento
+        sub_start = rng.Start + full_start + len("(sub)")
+        sub_end   = sub_start + len(inner_text)
+
+        # Aplica subíndice al contenido y aumenta el tamaño
+        sub_range = doc.Range(sub_start, sub_end)
+        sub_range.Font.Subscript = True
+        sub_range.Font.Size = 12  # Aumenta el tamaño (ajusta según necesidad)
+
+        # Borra primero la etiqueta de cierre
+        doc.Range(rng.Start + full_end - len("(/sub)"), rng.Start + full_end).Delete()
+        # Luego borra la etiqueta de apertura
+        doc.Range(rng.Start + full_start, rng.Start + full_start + len("(sub)")).Delete()
+
+        # Refresca texto del párrafo tras las eliminaciones
+        text = rng.Text
+
+    # 2) Procesar aperturas sueltas: (sub)…<fin de párrafo>
+    for m in reversed(list(open_re.finditer(text))):
+        start = m.start()
+        next_idx = start + len("(sub)")
+
+        # Si tras (sub) hay un espacio (o más), solo borramos la etiqueta
+        if next_idx < len(text) and text[next_idx].isspace():
+            doc.Range(rng.Start + start, rng.Start + start + len("(sub)")).Delete()
+            text = rng.Text
+            continue
+
+        # Si no hay espacio, verificamos que haya texto válido (como H2O) pegado a (sub)
+        if next_idx < len(text):
+            sub_start = rng.Start + start + len("(sub)")
+            sub_end   = rng.End - 1  # antes del salto de párrafo
+
+            # Aplica subíndice y aumenta el tamaño
+            sub_range = doc.Range(sub_start, sub_end)
+            sub_range.Font.Subscript = True
+            sub_range.Font.Size = 15  # Aumenta el tamaño (ajusta según necesidad)
+
+        # Borra la etiqueta de apertura
+        doc.Range(rng.Start + start, rng.Start + start + len("(sub)")).Delete()
+
+        # Refresca texto del párrafo tras las eliminaciones
+        text = rng.Text
+
+print("✅ Formateo de subíndices con (sub)…(/sub) y aperturas huérfanas completado.")
 
 
 print("Rename ficheros formato imagen en mayuscula lo convierte en minusculas")
@@ -2824,327 +2990,454 @@ except Exception as e:
 
    
    
-print("imagenes con enlaces html página imgbb img SRC ")
+
+print("imagenes con enlaces html página imgbb img SRC (gestionando casos con y sin pipes)")
+
+def verificar_conexion_ibb():
+    try:
+        response = requests.get("https://ibb.co/", timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+        if response.status_code == 200:
+            print("✅ Conexión a ibb.co verificada correctamente")
+            return True
+        else:
+            print(f"⚠️ ibb.co respondió con código {response.status_code}, continuando sin verificación")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Error al conectar con ibb.co: {e}. Continuando sin verificación")
+        return False
 
 def procesar_imagenes_html(doc):
-    import os, re, requests
-    from urllib.parse import unquote
-    import win32com.client as win32
-
-    # Intentar importar PIL para obtener las dimensiones de la imagen
+    # Verificar conexión a ibb.co al inicio
+    ibb_disponible = verificar_conexion_ibb()
+    
+    # Intentar importar PIL para obtener dimensiones
     try:
         from PIL import Image
         pillow_installed = True
     except ImportError:
         pillow_installed = False
 
-    # Directorio de attachments
+    # Directorio .attachments
     script_dir = os.path.dirname(os.path.abspath(__file__))
     attachments_dir = os.path.join(script_dir, ".attachments")
-    if not os.path.isdir(attachments_dir):
-        os.makedirs(attachments_dir)
-        print(f"Directorio .attachments creado: {attachments_dir}")
-    else:
-        print(f"Directorio .attachments encontrado: {attachments_dir}")
+    os.makedirs(attachments_dir, exist_ok=True)
+    print(f"📂 Directorio .attachments: {attachments_dir}")
 
-    # Patrón para imágenes de imgbb
-    img_pattern = re.compile(r'\(a href="[^"]+"\)\(img src="([^"]+)"[^>]*\/\)\(\/a\)')
+    # Patrones: con y sin pipes
+    pipe_pattern = re.compile(r"\|\(a href=\\"[^\\"]+\\"\)\(img src=\\"([^\\"]+)\\"[^>]*?/\\)\\(/a\)\\|", re.IGNORECASE)
+    html_pattern = re.compile(r"\(a href=\\"[^\\"]+\\"\\)\(img src=\\"([^\\"]+)\\"[^>]*?/\\)\\(/a\)", re.IGNORECASE)
+
+    # Constantes de tamaño y pipelines
+    MAX_HEIGHT = 6 * 28.3465
+    PIPE_FONT = 12
+    PIPE_ROW_H = PIPE_FONT + 2
+
     paragraphs = list(doc.Paragraphs)
+    session = requests.Session()
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    idx = 0
 
-    # Constantes de tamaño
-    max_height = 6 * 28.3465              # 6 cm en puntos
-    PIPELINE_FONT_SIZE = 12               # Tamaño de fuente para pipelines (pt)
-    PIPELINE_ROW_HEIGHT = PIPELINE_FONT_SIZE + 2  # Altura de fila para pipelines (pt)
+    def insert_with_pipes(range_obj, path, width, height):
+        try:
+            range_obj.Delete()
+            range_obj.Collapse(win32.constants.wdCollapseStart)
+            # Evaluar tamaño
+            max_h = MAX_HEIGHT
+            max_w = 15 * 28.3465
 
-    for paragraph in paragraphs:
-        match = img_pattern.search(paragraph.Range.Text)
-        if not match:
+            # Asegurar que width y height sean valores válidos
+            if width <= 0 or height <= 0:
+                width, height = 1000, 800  # Valores por defecto si las dimensiones fallan
+
+            # Decidir diseño según proporción: vertical (pipes a los lados) o horizontal (pipes arriba/abajo)
+            if height > width:
+                # Imagen más alta que ancha: pipes a los lados (tabla 1x3)
+                tbl = doc.Tables.Add(range_obj, 1, 3)
+                tbl.Borders.Enable = False
+                tbl.Rows.AllowBreakAcrossPages = False
+                # Izquierda
+                c1 = tbl.Cell(1, 1)
+                c1.Range.Text = "|"
+                c1.Range.Font.Size = PIPE_FONT
+                c1.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                # Imagen
+                c2 = tbl.Cell(1, 2)
+                pic = c2.Range.InlineShapes.AddPicture(path, False, True)
+                if pic.Height > max_h:
+                    pic.Height = max_h
+                c2.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                # Derecha
+                c3 = tbl.Cell(1, 3)
+                c3.Range.Text = "|"
+                c3.Range.Font.Size = PIPE_FONT
+                c3.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                tbl.Columns.AutoFit()
+            else:
+                # Imagen más ancha que alta: pipes arriba y abajo (tabla 3x1)
+                tbl = doc.Tables.Add(range_obj, 3, 1)
+                tbl.Borders.Enable = False
+                tbl.Rows.AllowBreakAcrossPages = False
+                # Arriba
+                top = tbl.Cell(1, 1)
+                top.Range.Text = "|"
+                top.Range.Font.Size = PIPE_FONT
+                top.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+                top.VerticalAlignment = win32.constants.wdCellAlignVerticalBottom
+                top.Range.ParagraphFormat.SpaceAfter = 0
+                top.Range.ParagraphFormat.SpaceBefore = 0
+                tbl.Rows(1).HeightRule = win32.constants.wdRowHeightExactly
+                tbl.Rows(1).Height = PIPE_FONT - 2  # Reducido para acercar el pipe
+                # Medio
+                mid = tbl.Cell(2, 1)
+                pic = mid.Range.InlineShapes.AddPicture(path, False, True)
+                if pic.Height > max_h:
+                    pic.Height = max_h
+                mid.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+                # Abajo
+                bot = tbl.Cell(3, 1)
+                bot.Range.Text = "|"
+                bot.Range.Font.Size = PIPE_FONT
+                bot.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+                tbl.Rows(3).HeightRule = win32.constants.wdRowHeightExactly
+                tbl.Rows(3).Height = PIPE_ROW_H
+                tbl.Columns.AutoFit()
+            return True
+        except Exception as e:
+            print(f"Error insert_with_pipes: {e}")
+            return False
+
+    def insert_without_pipes(range_obj, path):
+        try:
+            range_obj.Delete()
+            range_obj.Collapse(win32.constants.wdCollapseStart)
+            pic = range_obj.InlineShapes.AddPicture(path, False, True)
+            if pic.Height > MAX_HEIGHT:
+                pic.Height = MAX_HEIGHT
+            range_obj.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+            return True
+        except Exception as e:
+            print(f"Error insert_without_pipes: {e}")
+            return False
+
+    def descargar_imagen(img_url, session, headers):
+        try:
+            # Si la URL es de ibb.co y no pudimos verificar la conexión, intentar de todas formas
+            if "ibb.co" in img_url.lower() and not ibb_disponible:
+                print(f"⚠️ Intentando descargar de ibb.co sin verificación previa: {img_url}")
+            
+            r = session.get(img_url, headers=headers, stream=True, timeout=15)
+            if r.status_code != 200:
+                print(f"❌ Error HTTP {r.status_code} al descargar: {img_url}")
+                return None, None, None
+                
+            content_type = r.headers.get('content-type', '')
+            if 'image' not in content_type:
+                print(f"❌ Contenido no es imagen ({content_type}): {img_url}")
+                return None, None, None
+                
+            return r, True, None
+            
+        except requests.exceptions.Timeout:
+            print(f"⏱️ Timeout al descargar: {img_url}")
+            return None, None, "timeout"
+        except requests.exceptions.ConnectionError:
+            print(f"🌐 Error de conexión al descargar: {img_url}")
+            return None, None, "connection"
+        except Exception as e:
+            print(f"🚨 Error inesperado al descargar {img_url}: {e}")
+            return None, None, "error"
+
+    while idx < len(paragraphs):
+        par = paragraphs[idx]
+        text = par.Range.Text
+        m_pipe = pipe_pattern.search(text)
+        if m_pipe:
+            has_pipes = True
+            match = m_pipe
+        else:
+            m_html = html_pattern.search(text)
+            if m_html:
+                has_pipes = False
+                match = m_html
+            else:
+                idx += 1
+                continue
+                
+        img_url = match.group(1)
+        print(f"🔗 Procesando imagen: {img_url}")
+
+        # Verificar conexión con la URL completa
+        try:
+            test_conn = requests.get(img_url, stream=True, timeout=5, headers=headers, allow_redirects=True)
+            if test_conn.status_code != 200:
+                print("Lo siento, la página está caída por lo cual no puedo descargar la imagen")
+                idx += 1
+                continue
+            test_conn.close()
+        except requests.RequestException:
+            print("Lo siento, la página está caída por lo cual no puedo descargar la imagen")
+            idx += 1
             continue
 
-        img_url = match.group(1)
-        print(f"Encontrada imagen: {img_url}")
-
+        # Descargar imagen si hay conexión
+        print("Con respuesta, con gusto podré insertar la imagen en Microsoft Word y descargarla")
+        response, success, error_type = descargar_imagen(img_url, session, headers)
+        
+        if not success:
+            print(f"⏭️ Saltando imagen {img_url} debido a error de descarga")
+            idx += 1
+            continue
+            
         try:
-            # Descargar la imagen
-            response = requests.get(img_url)
-            if response.status_code != 200:
-                print(f"Error al descargar la imagen: {img_url}")
-                continue
-
-            # Guardar en .attachments
-            img_name = unquote(os.path.basename(img_url)).replace(' ', '_')
-            img_path = os.path.join(attachments_dir, img_name)
-            with open(img_path, 'wb') as f:
-                f.write(response.content)
-            print(f"Imagen descargada: {img_path}")
-
-            # Determinar orientación con Pillow, si está disponible
+            # Generar nombre de archivo
+            name = unquote(os.path.basename(img_url)).replace(' ','_')
+            if not name.lower().endswith((".jpg",".jpeg",".png")): 
+                name += ".jpg"
+            path = os.path.join(attachments_dir, name)
+            
+            # Guardar imagen
+            with open(path, 'wb') as f:
+                for chunk in response.iter_content(1024): 
+                    f.write(chunk)
+            print(f"✅ Descargada: {name}")
+            
+            # Obtener dimensiones si PIL está disponible
             if pillow_installed:
-                with Image.open(img_path) as im:
-                    width, height = im.size
+                try:
+                    with Image.open(path) as im: 
+                        w, h = im.size
+                except Exception as e:
+                    print(f"⚠️ Error obteniendo dimensiones de {name}: {e}")
+                    w, h = 1000, 800  # Valores por defecto
+            else: 
+                w, h = 1000, 800  # Valores por defecto sin PIL
+            
+            # Definir rango para inserción
+            rng = par.Range.Duplicate
+            rng.Start = par.Range.Start + match.start()
+            rng.End = par.Range.Start + match.end()
+            
+            # Insertar imagen en el documento
+            if has_pipes:
+                if insert_with_pipes(rng, path, w, h):
+                    print(f"🖼️ Insertada con pipes: {name}")
+                else:
+                    print(f"❌ Error insertando con pipes: {name}")
             else:
-                # Si no, asumimos horizontal
-                width, height = 1000, 0
-
-            # Eliminar el texto markdown original
-            rng = paragraph.Range.Duplicate
-            rng.Start = paragraph.Range.Start + match.start()
-            rng.End = paragraph.Range.Start + match.end()
-            rng.Delete()
-
-            # --- Rama vertical: pipelines a izquierda y derecha ---
-            if height > width:
-                table = doc.Tables.Add(paragraph.Range, 1, 3)
-                table.Borders.Enable = False
-                table.Rows.AllowBreakAcrossPages = False
-
-                # Pipeline izquierdo
-                left_cell = table.Cell(1, 1)
-                left_cell.Range.Text = "|"
-                left_cell.Range.Font.Size = PIPELINE_FONT_SIZE
-                left_cell.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
-                left_cell.Range.ParagraphFormat.SpaceBefore = 0
-                left_cell.Range.ParagraphFormat.SpaceAfter = 0
-
-                # Imagen en el centro
-                center_cell = table.Cell(1, 2)
-                image = center_cell.Range.InlineShapes.AddPicture(
-                    FileName=img_path, LinkToFile=False, SaveWithDocument=True
-                )
-                image.Height = max_height
-                center_cell.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
-
-                # Pipeline derecho
-                right_cell = table.Cell(1, 3)
-                right_cell.Range.Text = "|"
-                right_cell.Range.Font.Size = PIPELINE_FONT_SIZE
-                right_cell.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
-                right_cell.Range.ParagraphFormat.SpaceBefore = 0
-                right_cell.Range.ParagraphFormat.SpaceAfter = 0
-
-                # Ajuste final de columnas
-                table.Columns.AutoFit()
-
-            # --- Rama horizontal o cuadrada: pipelines arriba y abajo ---
-            else:
-                table = doc.Tables.Add(paragraph.Range, 3, 1)
-                table.Borders.Enable = False
-                table.Rows.AllowBreakAcrossPages = False
-
-                # Pipeline superior (fila 1)
-                sup = table.Cell(1, 1)
-                sup.Range.Text = "|"
-                sup.Range.Font.Size = PIPELINE_FONT_SIZE
-                sup.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
-                sup.Range.ParagraphFormat.SpaceBefore = 0
-                sup.Range.ParagraphFormat.SpaceAfter = 0
-                sup.Range.ParagraphFormat.KeepWithNext = True
-
-                # Fijar altura exacta para fila superior
-                row_sup = table.Rows(1)
-                row_sup.HeightRule = win32.constants.wdRowHeightExactly
-                row_sup.Height = PIPELINE_ROW_HEIGHT
-
-                # Imagen en el medio (fila 2)
-                mid = table.Cell(2, 1)
-                mid.Range.ParagraphFormat.KeepWithNext = True
-                mid.Range.ParagraphFormat.KeepTogether = True
-                image = mid.Range.InlineShapes.AddPicture(
-                    FileName=img_path, LinkToFile=False, SaveWithDocument=True
-                )
-                image.Height = max_height
-                mid.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
-
-                # Pipeline inferior (fila 3)
-                inf = table.Cell(3, 1)
-                inf.Range.Text = "|"
-                inf.Range.Font.Size = PIPELINE_FONT_SIZE
-                inf.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
-                inf.Range.ParagraphFormat.SpaceBefore = 0
-                inf.Range.ParagraphFormat.SpaceAfter = 0
-                inf.Range.ParagraphFormat.KeepTogether = True
-                inf.TopPadding = 0
-                inf.BottomPadding = 0
-
-                # Fijar altura exacta para fila inferior
-                row_inf = table.Rows(3)
-                row_inf.HeightRule = win32.constants.wdRowHeightExactly
-                row_inf.Height = PIPELINE_ROW_HEIGHT
-
-                # Ajuste final de columnas
-                table.Columns.AutoFit()
-
-            print(f"Imagen insertada: {img_name}")
-
+                if insert_without_pipes(rng, path):
+                    print(f"🖼️ Insertada sin pipes: {name}")
+                else:
+                    print(f"❌ Error insertando sin pipes: {name}")
+            
+            # Refrescar lista de párrafos después de la inserción
+            paragraphs = list(doc.Paragraphs)
+            idx += 1
+            
         except Exception as e:
-            print(f"Error al procesar la imagen {img_url}: {e}")
+            print(f"🚨 Error procesando imagen {img_url}: {e}")
+            idx += 1
+            
+    session.close()
+    print("🏁 Procesamiento de imágenes completado")
 
-# Llamada a la función
+# Ejecutar
 procesar_imagenes_html(doc)
 
 
 
 
 
-print("Imágenes con enlaces html página postimg.cc")
+print("Imágenes con enlaces html página postimages.org postimg.cc")
 
 def procesar_imagenes_html(doc):
-    import os, re, requests
-    from urllib.parse import unquote
-    import win32com.client as win32
-
-    # Intentar importar PIL para determinar orientación de la imagen
+    # PIL para medir orientación
     try:
         from PIL import Image
-        pillow_installed = True
+        pillow = True
     except ImportError:
-        pillow_installed = False
+        pillow = False
 
-    # Directorio de attachments
+    # Carpeta de attachments
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    attachments_dir = os.path.join(script_dir, ".attachments")
-    if not os.path.isdir(attachments_dir):
-        os.makedirs(attachments_dir)
-        print(f"Directorio .attachments creado: {attachments_dir}")
-    else:
-        print(f"Directorio .attachments encontrado: {attachments_dir}")
+    attach_dir = os.path.join(script_dir, ".attachments")
+    os.makedirs(attach_dir, exist_ok=True)
 
-    # Patrón para (a href=...)(img src=.../)(/a) en postimg.cc
-    img_pattern = re.compile(
+    # Patrones para HTML postimg.cc con y sin pipes
+    pipe_pat = re.compile(
+        r"\|\(a\s+[^)]+\)\(img\s+[^)]*src=['\\"]([^'\\"]+)['\\"][^)]*\)\(/a\)\|",
+        re.IGNORECASE
+    )
+    html_pat = re.compile(
         r"\(a\s+[^)]+\)\(img\s+[^)]*src=['\\"]([^'\\"]+)['\\"][^)]*\)\(/a\)",
         re.IGNORECASE
     )
 
     # Constantes de tamaño
-    MAX_HEIGHT = 6 * 28.3465          # 6 cm en puntos
-    PIPELINE_FONT_SIZE = 12           # Tamaño de fuente para el carácter "|"
-    PIPELINE_ROW_HEIGHT = PIPELINE_FONT_SIZE + 2  # Altura fija de fila para pipelines
+    MAX_H    = 6 * 28.3465   # 6 cm en puntos
+    PIPE_SZ  = 12            # tamaño de "|" en pts
+    PIPE_H   = PIPE_SZ + 2   # altura de fila de pipes
 
-    encontrado = False
-    for paragraph in list(doc.Paragraphs):
-        texto = paragraph.Range.Text
-        match = img_pattern.search(texto)
-        if not match:
-            continue
-        encontrado = True
-        img_url = match.group(1)
-        print(f"Encontrada imagen: {img_url}")
-
+    def insert_with_pipes(rng, img_path, w, h):
         try:
-            # Descargar la imagen
-            resp = requests.get(img_url)
-            if resp.status_code != 200:
-                print(f"Error al descargar la imagen: {img_url} - Status {resp.status_code}")
+            rng.Delete()
+            rng.Collapse(win32.constants.wdCollapseStart)
+
+            MAX_H    = 6 * 28.3465
+            MAX_W_PT = 15 * 28.3465
+            PIPE_SZ  = 12
+            PIPE_H   = PIPE_SZ + 2
+
+            # Tabla para medir imagen
+            temp = doc.Tables.Add(rng, 1, 1)
+            temp.Borders.Enable = False
+            cell = temp.Cell(1, 1)
+            pic  = cell.Range.InlineShapes.AddPicture(img_path, False, True)
+            if pic.Height > MAX_H:
+                pic.Height = MAX_H
+            img_width = pic.Width
+            temp.Delete()
+
+            if img_width < MAX_W_PT:
+                # Tabla 3x2: (fila superior vacía, fila imagen combinada, fila inferior con dos pipes)
+                tbl = doc.Tables.Add(rng, 3, 2)
+                tbl.Borders.Enable = False
+                tbl.Rows.AllowBreakAcrossPages = False
+
+                # Fila 1: vacía
+                tbl.Cell(1, 1).Range.Text = ""
+                tbl.Cell(1, 2).Range.Text = ""
+
+                # Fila 2: imagen centrada en celda combinada
+                tbl.Cell(2, 1).Merge(tbl.Cell(2, 2))
+                img_cell = tbl.Cell(2, 1)
+                pic = img_cell.Range.InlineShapes.AddPicture(img_path, False, True)
+                if pic.Height > MAX_H:
+                    pic.Height = MAX_H
+                img_cell.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+
+                # Fila 3: pipes en celdas izquierda y derecha
+                left_pipe  = tbl.Cell(3, 1)
+                right_pipe = tbl.Cell(3, 2)
+
+                left_pipe.Range.Text = "|"
+                left_pipe.Range.Font.Size = PIPE_SZ
+                left_pipe.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+
+                right_pipe.Range.Text = "|"
+                right_pipe.Range.Font.Size = PIPE_SZ
+                right_pipe.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphRight
+
+                # Ajustar altura fila inferior
+                tbl.Rows(3).HeightRule = win32.constants.wdRowHeightExactly
+                tbl.Rows(3).Height = PIPE_H
+
+            else:
+                # Imagen ancha: tabla 3x1 con pipe arriba y abajo
+                tbl = doc.Tables.Add(rng, 3, 1)
+                tbl.Borders.Enable = False
+
+                tbl.Cell(1, 1).Range.Text = "|"
+                tbl.Cell(1, 1).Range.Font.Size = PIPE_SZ
+                tbl.Cell(1, 1).Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+
+                mid_cell = tbl.Cell(2, 1)
+                pic = mid_cell.Range.InlineShapes.AddPicture(img_path, False, True)
+                if pic.Height > MAX_H:
+                    pic.Height = MAX_H
+                mid_cell.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+
+                tbl.Cell(3, 1).Range.Text = "|"
+                tbl.Cell(3, 1).Range.Font.Size = PIPE_SZ
+                tbl.Cell(3, 1).Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
+
+                tbl.Rows(1).HeightRule = win32.constants.wdRowHeightExactly
+                tbl.Rows(1).Height = PIPE_H
+                tbl.Rows(3).HeightRule = win32.constants.wdRowHeightExactly
+                tbl.Rows(3).Height = PIPE_H
+
+            tbl.Columns.AutoFit()
+            return True
+        except Exception as e:
+            print(f"❌ Error insert_with_pipes: {e}")
+            return False
+
+
+    def insert_without_pipes(rng, img_path):
+        try:
+            rng.Delete(); rng.Collapse(win32.constants.wdCollapseStart)
+            pic = rng.InlineShapes.AddPicture(img_path, False, True)
+            if pic.Height > MAX_H: pic.Height = MAX_H
+            rng.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
+            return True
+        except Exception as e:
+            print(f"Error insert_without_pipes: {e}")
+            return False
+
+    # Recorremos párrafos
+    for para in list(doc.Paragraphs):
+        text = para.Range.Text
+        m = pipe_pat.search(text)
+        has_pipes = bool(m)
+        if not m:
+            m = html_pat.search(text)
+            if not m:
                 continue
 
-            # Guardar la imagen
-            img_name = unquote(os.path.basename(img_url)).replace(' ', '_')
-            img_path = os.path.join(attachments_dir, img_name)
-            with open(img_path, 'wb') as f:
-                f.write(resp.content)
-            print(f"Imagen descargada y guardada: {img_path}")
+        url = m.group(1)
+        s, e = m.span()
+        print(f"Procesando {url} (pipes={'sí' if has_pipes else 'no'})")
 
-            # Determinar orientación
-            if pillow_installed:
-                with Image.open(img_path) as im:
-                    width, height = im.size
-            else:
-                # Suponer horizontal si no hay PIL
-                width, height = 1000, 0
+        # Verificar conexión con la URL completa
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        try:
+            # Usamos GET con stream para verificar, pero sin descargar todo
+            test_conn = requests.get(url, stream=True, timeout=5, headers=headers, allow_redirects=True)
+            if test_conn.status_code != 200:
+                print("Lo siento, la página está caída por lo cual no puedo descargar la imagen")
+                continue
+            # Cerramos la conexión de prueba para no consumir recursos
+            test_conn.close()
+        except requests.RequestException:
+            print("Lo siento, la página está caída por lo cual no puedo descargar la imagen")
+            continue
 
-            # Eliminar el fragmento original
-            rng = paragraph.Range.Duplicate
-            rng.Start = paragraph.Range.Start + match.start()
-            rng.End = paragraph.Range.Start + match.end()
-            rng.Delete()
+        # Descargar imagen si hay conexión
+        print("Con respuesta, con gusto podré insertar la imagen en Microsoft Word y descargarla")
+        resp = requests.get(url, stream=True, headers=headers)
+        if resp.status_code != 200 or 'image' not in resp.headers.get('content-type',''):
+            print(f"Error descarga {resp.status_code}")
+            continue
 
-            # Insertar la tabla según orientación
-            if height > width:
-                # Vertical: pipeline izquierda / imagen / pipeline derecha
-                table = doc.Tables.Add(paragraph.Range, 1, 3)
-                table.Borders.Enable = False
-                table.Rows.AllowBreakAcrossPages = False
+        # Guardar
+        fn = unquote(os.path.basename(url)).replace(' ','_')
+        if not fn.lower().endswith((".jpg",".jpeg",".png")): fn += ".jpg"
+        path = os.path.join(attach_dir, fn)
+        with open(path, 'wb') as f:
+            for chunk in resp.iter_content(1024):
+                f.write(chunk)
 
-                # Celda izquierda: pipeline
-                left = table.Cell(1, 1)
-                left.Range.Text = "|"
-                left.Range.Font.Size = PIPELINE_FONT_SIZE
-                left.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
-                left.Range.ParagraphFormat.SpaceBefore = 0
-                left.Range.ParagraphFormat.SpaceAfter = 0
+        # Medir
+        if pillow:
+            from PIL import Image
+            w,h = Image.open(path).size
+        else:
+            w,h = 1000,0
 
-                # Celda central: imagen
-                center = table.Cell(1, 2)
-                img_shape = center.Range.InlineShapes.AddPicture(
-                    FileName=img_path, LinkToFile=False, SaveWithDocument=True
-                )
-                img_shape.Height = MAX_HEIGHT
-                center.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
+        # Rango a eliminar
+        rng = para.Range.Duplicate
+        rng.Start = para.Range.Start + s
+        rng.End   = para.Range.Start + e
 
-                # Celda derecha: pipeline
-                right = table.Cell(1, 3)
-                right.Range.Text = "|"
-                right.Range.Font.Size = PIPELINE_FONT_SIZE
-                right.Range.ParagraphFormat.Alignment = win32.constants.wdAlignCenter
-                right.Range.ParagraphFormat.SpaceBefore = 0
-                right.Range.ParagraphFormat.SpaceAfter = 0
+        # Insertar
+        if has_pipes:
+            insert_with_pipes(rng, path, w, h)
+        else:
+            insert_without_pipes(rng, path)
 
-                table.Columns.AutoFit()
-            else:
-                # Horizontal o cuadrada: pipeline arriba / imagen / pipeline abajo
-                table = doc.Tables.Add(paragraph.Range, 3, 1)
-                table.Borders.Enable = False
-                table.Rows.AllowBreakAcrossPages = False
+        print(f"Insertada: {fn} (pipes={'sí' if has_pipes else 'no'})")
 
-                # Fila superior: pipeline
-                sup = table.Cell(1, 1)
-                sup.Range.Text = "|"
-                sup.Range.Font.Size = PIPELINE_FONT_SIZE
-                sup.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
-                sup.Range.ParagraphFormat.SpaceBefore = 0
-                sup.Range.ParagraphFormat.SpaceAfter = 0
-                sup.Range.ParagraphFormat.KeepWithNext = True
-                row_sup = table.Rows(1)
-                row_sup.HeightRule = win32.constants.wdRowHeightExactly
-                row_sup.Height = PIPELINE_ROW_HEIGHT
-
-                # Fila central: imagen
-                mid = table.Cell(2, 1)
-                mid.Range.ParagraphFormat.KeepWithNext = True
-                mid.Range.ParagraphFormat.KeepTogether = True
-                img_shape = mid.Range.InlineShapes.AddPicture(
-                    FileName=img_path, LinkToFile=False, SaveWithDocument=True
-                )
-                img_shape.Height = MAX_HEIGHT
-                mid.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphCenter
-
-                # Fila inferior: pipeline
-                inf = table.Cell(3, 1)
-                inf.Range.Text = "|"
-                inf.Range.Font.Size = PIPELINE_FONT_SIZE
-                inf.Range.ParagraphFormat.Alignment = win32.constants.wdAlignParagraphLeft
-                inf.Range.ParagraphFormat.SpaceBefore = 0
-                inf.Range.ParagraphFormat.SpaceAfter = 0
-                inf.Range.ParagraphFormat.KeepTogether = True
-                inf.TopPadding = 0
-                inf.BottomPadding = 0
-                row_inf = table.Rows(3)
-                row_inf.HeightRule = win32.constants.wdRowHeightExactly
-                row_inf.Height = PIPELINE_ROW_HEIGHT
-
-                table.Columns.AutoFit()
-
-            print(f"Imagen insertada con pipelines: {img_name}")
-
-        except Exception as e:
-            print(f"Error al procesar la imagen {img_url}: {e}")
-
-    if not encontrado:
-        print("No se encontró ninguna imagen con el patrón especificado.")
-
-# Llamada a la función
+# Al final
 procesar_imagenes_html(doc)
-
 
 
 
